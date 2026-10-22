@@ -1,0 +1,790 @@
+#!/usr/bin/env python3
+"""
+import-struct - физическая структура БД в db-struct.yaml
+
+    import-struct --flyway DIR [DIR ...]       SQL-миграции Flyway (V<версия>__*.sql)
+    import-struct --liquibase MASTER.xml       changelog Liquibase (XML, include по порядку)
+    import-struct --db DSN [--schema public]   живая база PostgreSQL через psql
+
+    -o FILE    куда писать (по умолчанию doc/db/db-struct.yaml текущего каталога)
+
+Результат одинаков по форме для всех источников: таблицы, колонки по порядку, тип, обязательность, первичный ключ,
+ссылки (FK) и допустимые значения из CHECK (col IN (...)). Файл генерируется, руками не правится.
+"""
+import argparse
+import re
+import subprocess
+import sys
+import xml.etree.ElementTree as ET
+from pathlib import Path
+
+import yaml
+
+DEFAULT_OUT = Path("doc") / "db" / "db-struct.yaml"
+
+# служебные таблицы инструментов миграций в документацию не попадают
+SERVICE_TABLES = {"flyway_schema_history", "databasechangelog", "databasechangeloglock"}
+
+
+def warn(msg):
+    print(f"WARN {msg}", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
+# Модель
+# ---------------------------------------------------------------------------
+
+class Schema:
+    """
+    Таблицы в порядке создания, колонки в физическом порядке. Имена без кавычек приводятся к нижнему регистру,
+    как это делает PostgreSQL. Ограничения хранятся по имени: DROP CONSTRAINT снимает именно то, что объявлено.
+    """
+
+    def __init__(self):
+        self.tables = {}
+
+    def table(self, name, where):
+        t = self.tables.get(name)
+        if t is None:
+            warn(f"{where}: unknown table {name}")
+        return t
+
+    def column(self, t, tname, col, where):
+        c = t["columns"].get(col)
+        if c is None:
+            warn(f"{where}: unknown column {tname}.{col}")
+        return c
+
+    def create(self, name):
+        self.tables[name] = {"columns": {}, "pk": [], "constraints": {}}
+        return self.tables[name]
+
+    def drop(self, name):
+        self.tables.pop(name, None)
+        for t in self.tables.values():
+            for cname, con in list(t["constraints"].items()):
+                if con["kind"] == "fk" and con["ref"] == name:
+                    del t["constraints"][cname]
+
+    def rename_table(self, old, new):
+        self.tables = {(new if k == old else k): v for k, v in self.tables.items()}
+        for t in self.tables.values():
+            for con in t["constraints"].values():
+                if con["kind"] == "fk" and con["ref"] == old:
+                    con["ref"] = new
+
+    @staticmethod
+    def rename_column(t, old, new):
+        t["columns"] = {(new if k == old else k): v for k, v in t["columns"].items()}
+        t["pk"] = [new if c == old else c for c in t["pk"]]
+        for con in t["constraints"].values():
+            if con.get("column") == old:
+                con["column"] = new
+
+    @staticmethod
+    def drop_column(t, col):
+        t["columns"].pop(col, None)
+        if col in t["pk"]:
+            t["pk"] = []
+        for cname, con in list(t["constraints"].items()):
+            if con.get("column") == col:
+                del t["constraints"][cname]
+
+    def to_yaml_data(self):
+        out = {}
+        for tname in sorted(self.tables):
+            t = self.tables[tname]
+            refs, values = {}, {}
+            for con in t["constraints"].values():
+                if con["kind"] == "fk":
+                    refs[con["column"]] = con["ref"]
+                elif con["kind"] == "values":
+                    values[con["column"]] = con["values"]
+            cols = {}
+            for cname, c in t["columns"].items():
+                d = {"type": c["type"]}
+                if c["required"] or cname in t["pk"]:
+                    d["required"] = True
+                if cname in refs:
+                    d["references"] = refs[cname]
+                if cname in values:
+                    d["values"] = values[cname]
+                cols[cname] = d
+            entry = {}
+            if t["pk"]:
+                entry["primary_key"] = list(t["pk"])
+            entry["columns"] = cols
+            out[tname] = entry
+        return out
+
+
+# ---------------------------------------------------------------------------
+# Типы: одно написание для всех источников (как у PostgreSQL, но короче)
+# ---------------------------------------------------------------------------
+
+_TYPE_ALIASES = {
+    "int": "integer", "int4": "integer", "integer": "integer", "serial": "integer", "serial4": "integer",
+    "bigint": "bigint", "int8": "bigint", "bigserial": "bigint", "serial8": "bigint",
+    "smallint": "smallint", "int2": "smallint", "smallserial": "smallint", "tinyint": "smallint",
+    "bool": "boolean", "boolean": "boolean",
+    "timestamptz": "timestamptz", "timestamp with time zone": "timestamptz",
+    "timestamp": "timestamp", "timestamp without time zone": "timestamp", "datetime": "timestamp",
+    "timetz": "timetz", "time with time zone": "timetz", "time": "time", "time without time zone": "time",
+    "float": "double precision", "float8": "double precision", "double": "double precision",
+    "double precision": "double precision", "float4": "real", "real": "real",
+    "clob": "text", "longtext": "text", "text": "text",
+    "decimal": "numeric", "numeric": "numeric",
+    "character varying": "varchar", "varchar": "varchar", "nvarchar": "varchar", "varchar2": "varchar",
+    "character": "char", "char": "char", "bpchar": "char", "nchar": "char",
+}
+
+
+def norm_type(raw):
+    t = re.sub(r"\s+", " ", (raw or "").strip().lower())
+    array = ""
+    while t.endswith("[]"):
+        array += "[]"
+        t = t[:-2].strip()
+    m = re.match(r"^(.*?)\s*\(([^)]*)\)\s*(.*)$", t)
+    args = ""
+    if m:
+        t = (m.group(1) + (" " + m.group(3) if m.group(3) else "")).strip()
+        args = "(" + re.sub(r"\s+", "", m.group(2)) + ")"
+    t = _TYPE_ALIASES.get(t, t)
+    # точность у timestamp(6) и т. п. для документации не важна
+    if t in ("timestamptz", "timestamp", "time", "timetz"):
+        args = ""
+    return t + args + array
+
+
+# ---------------------------------------------------------------------------
+# SQL: разбиение на операторы и разбор DDL (Flyway)
+# ---------------------------------------------------------------------------
+
+def split_statements(sql):
+    """Операторы по «;» вне строк, комментариев, $$-блоков и скобок. Комментарии выбрасываются."""
+    out, buf, i, n, depth = [], [], 0, len(sql), 0
+    while i < n:
+        ch = sql[i]
+        if sql.startswith("--", i):
+            j = sql.find("\n", i)
+            i = n if j < 0 else j
+            continue
+        if sql.startswith("/*", i):
+            j = sql.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            buf.append(" ")
+            continue
+        if ch in ("'", '"'):
+            j = i + 1
+            while j < n:
+                if sql[j] == ch:
+                    if j + 1 < n and sql[j + 1] == ch:
+                        j += 2
+                        continue
+                    break
+                j += 1
+            buf.append(sql[i:j + 1])
+            i = j + 1
+            continue
+        m = re.match(r"\$[A-Za-z_]*\$", sql[i:])
+        if m:
+            tag = m.group(0)
+            j = sql.find(tag, i + len(tag))
+            j = n if j < 0 else j + len(tag)
+            buf.append(sql[i:j])
+            i = j
+            continue
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == ";" and depth == 0:
+            out.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        out.append(tail)
+    return [s for s in out if s]
+
+
+def split_top(s, sep=","):
+    """Делит по разделителю на верхнем уровне скобок и вне строк."""
+    parts, buf, depth, q = [], [], 0, None
+    for ch in s:
+        if q:
+            buf.append(ch)
+            if ch == q:
+                q = None
+            continue
+        if ch in ("'", '"'):
+            q = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if "".join(buf).strip():
+        parts.append("".join(buf).strip())
+    return parts
+
+
+def ident(s):
+    s = s.strip()
+    if s.startswith('"') and s.endswith('"'):
+        return s[1:-1]
+    s = s.lower()
+    return s.split(".")[-1]  # схема в имени таблицы не нужна
+
+
+def paren_body(s, start):
+    """Текст внутри скобок, открывающихся в позиции start, и позиция после закрывающей."""
+    depth, q = 0, None
+    for j in range(start, len(s)):
+        ch = s[j]
+        if q:
+            if ch == q:
+                q = None
+            continue
+        if ch in ("'", '"'):
+            q = ch
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return s[start + 1:j], j + 1
+    return s[start + 1:], len(s)
+
+
+IDENT = r'(?:"[^"]+"|[A-Za-z_][\w$]*)(?:\.(?:"[^"]+"|[A-Za-z_][\w$]*))?'
+COL_KEYWORDS = r"\b(NOT|NULL|DEFAULT|PRIMARY|REFERENCES|UNIQUE|CHECK|CONSTRAINT|COLLATE|GENERATED)\b"
+
+
+def check_values(expr):
+    """CHECK (col IN ('A', 'B')) или col = ANY (ARRAY[...]) -> (col, [значения]), иначе None."""
+    e = expr.strip()
+    while e.startswith("(") and paren_body(e, 0)[1] == len(e):
+        e = paren_body(e, 0)[0].strip()
+    m = re.match(r"^\(?\s*(" + IDENT + r")\s*\)?(?:::\w+)?\s+IN\s*\((.*)\)$", e, re.I | re.S) \
+        or re.match(r"^\(?\s*(" + IDENT + r")\s*\)?(?:::\w+)?\s*=\s*ANY\s*\(.*ARRAY\s*\[(.*)\].*\)$", e, re.I | re.S)
+    if not m:
+        return None
+    items = split_top(m.group(2))
+    vals = []
+    for it in items:
+        # значение бывает в скобках: ('A'::character varying)::text - так PostgreSQL выводит CHECK после восстановления
+        lit = re.match(r"^[\s(]*'((?:[^']|'')*)'", it)
+        if not lit:
+            return None
+        vals.append(lit.group(1).replace("''", "'"))
+    return ident(m.group(1)), vals
+
+
+class FlywayParser:
+
+    def __init__(self, schema):
+        self.s = schema
+
+    def run(self, dirs):
+        files = []
+        for d in dirs:
+            for p in Path(d).glob("V*__*.sql"):
+                ver = p.name[1:p.name.index("__")]
+                files.append((tuple(int(x) for x in re.split(r"[._]", ver)), p))
+        files.sort()
+        if not files:
+            sys.exit(f"No V*__*.sql migrations in {', '.join(map(str, dirs))}")
+        for _, p in files:
+            for st in split_statements(p.read_text(encoding="utf-8")):
+                self.statement(st, p.name)
+
+    def statement(self, st, fname):
+        flat = re.sub(r"\s+", " ", st)
+        m = re.match(r"(?i)CREATE (?:UNLOGGED |TEMP |TEMPORARY )?TABLE (?:IF NOT EXISTS )?(" + IDENT + r")\s*\(", flat)
+        if m:
+            body, _ = paren_body(flat, m.end() - 1)
+            self.create_table(ident(m.group(1)), body, fname)
+            return
+        m = re.match(r"(?i)ALTER TABLE (?:IF EXISTS )?(?:ONLY )?(" + IDENT + r") (.*)$", flat)
+        if m:
+            self.alter_table(ident(m.group(1)), m.group(2), fname)
+            return
+        m = re.match(r"(?i)DROP TABLE (?:IF EXISTS )?(.*?)(?: CASCADE| RESTRICT)?$", flat)
+        if m:
+            for name in split_top(m.group(1)):
+                self.s.drop(ident(name))
+            return
+        # INSERT, UPDATE, CREATE INDEX, CREATE EXTENSION и прочее структуру таблиц не меняют
+
+    # -- CREATE TABLE ---------------------------------------------------------
+
+    def create_table(self, tname, body, where):
+        if tname in self.s.tables:
+            warn(f"{where}: table {tname} is created again")
+        t = self.s.create(tname)
+        for el in split_top(body):
+            if re.match(r"(?i)(CONSTRAINT|PRIMARY KEY|UNIQUE|CHECK|FOREIGN KEY|EXCLUDE)\b", el):
+                self.table_constraint(t, tname, el, where)
+            elif re.match(r"(?i)LIKE\b", el):
+                warn(f"{where}: {tname}: LIKE is not supported")
+            else:
+                self.add_column(t, tname, el, where)
+
+    def add_column(self, t, tname, el, where):
+        m = re.match(r"(" + IDENT + r")\s+(.*)$", el, re.S)
+        if not m:
+            warn(f"{where}: {tname}: cannot parse column '{el}'")
+            return
+        col, rest = ident(m.group(1)), m.group(2)
+        k = re.search(COL_KEYWORDS, rest, re.I)
+        ctype, cons = (rest[:k.start()], rest[k.start():]) if k else (rest, "")
+        t["columns"][col] = {"type": norm_type(ctype), "required": False}
+        self.column_constraints(t, tname, col, cons)
+
+    def column_constraints(self, t, tname, col, cons):
+        c = t["columns"][col]
+        if re.search(r"(?i)\bNOT NULL\b", cons):
+            c["required"] = True
+        if re.search(r"(?i)\bPRIMARY KEY\b", cons):
+            t["pk"] = [col]
+            c["required"] = True
+            t["constraints"][f"{tname}_pkey"] = {"kind": "pk"}
+        r = re.search(r"(?i)\bREFERENCES\s+(" + IDENT + r")", cons)
+        if r:
+            t["constraints"][f"{tname}_{col}_fkey"] = {"kind": "fk", "column": col, "ref": ident(r.group(1))}
+        ch = re.search(r"(?i)\bCHECK\s*\(", cons)
+        if ch:
+            expr, _ = paren_body(cons, ch.end() - 1)
+            v = check_values(expr)
+            if v and v[0] == col:
+                t["constraints"][f"{tname}_{col}_check"] = {"kind": "values", "column": col, "values": v[1]}
+
+    def table_constraint(self, t, tname, el, where, name=None):
+        m = re.match(r"(?i)CONSTRAINT\s+(" + IDENT + r")\s+(.*)$", el, re.S)
+        if m:
+            name, el = ident(m.group(1)), m.group(2)
+        if re.match(r"(?i)PRIMARY KEY", el):
+            body, _ = paren_body(el, el.index("("))
+            t["pk"] = [ident(c) for c in split_top(body)]
+            for c in t["pk"]:
+                if c in t["columns"]:
+                    t["columns"][c]["required"] = True
+            t["constraints"][name or f"{tname}_pkey"] = {"kind": "pk"}
+        elif re.match(r"(?i)FOREIGN KEY", el):
+            body, after = paren_body(el, el.index("("))
+            cols = [ident(c) for c in split_top(body)]
+            r = re.search(r"(?i)REFERENCES\s+(" + IDENT + r")", el[after:])
+            if r and len(cols) == 1:
+                t["constraints"][name or f"{tname}_{cols[0]}_fkey"] = {
+                    "kind": "fk", "column": cols[0], "ref": ident(r.group(1))}
+            elif r:
+                warn(f"{where}: {tname}: composite FK ({', '.join(cols)}) is not shown")
+        elif re.match(r"(?i)CHECK", el):
+            expr, _ = paren_body(el, el.index("("))
+            v = check_values(expr)
+            if v:
+                t["constraints"][name or f"{tname}_{v[0]}_check"] = {
+                    "kind": "values", "column": v[0], "values": v[1]}
+            elif name:
+                t["constraints"][name] = {"kind": "other"}
+        elif name:
+            t["constraints"][name] = {"kind": "other"}
+
+    # -- ALTER TABLE ----------------------------------------------------------
+
+    def alter_table(self, tname, actions, where):
+        m = re.match(r"(?i)RENAME TO (" + IDENT + r")$", actions)
+        if m:
+            if self.s.table(tname, where) is not None:
+                self.s.rename_table(tname, ident(m.group(1)))
+            return
+        t = self.s.table(tname, where)
+        if t is None:
+            return
+        m = re.match(r"(?i)RENAME (?:COLUMN )?(" + IDENT + r") TO (" + IDENT + r")$", actions)
+        if m:
+            if re.match(r"(?i)RENAME CONSTRAINT", actions):
+                return
+            old = ident(m.group(1))
+            if self.s.column(t, tname, old, where) is not None:
+                self.s.rename_column(t, old, ident(m.group(2)))
+            return
+        for act in split_top(actions):
+            self.alter_action(t, tname, act, where)
+
+    def alter_action(self, t, tname, act, where):
+        m = re.match(r"(?i)ADD (?:COLUMN )?(?:IF NOT EXISTS )?(?!CONSTRAINT\b|PRIMARY\b|UNIQUE\b|CHECK\b|FOREIGN\b)(.*)$", act)
+        if m:
+            self.add_column(t, tname, m.group(1), where)
+            return
+        if re.match(r"(?i)ADD ", act):
+            self.table_constraint(t, tname, act[4:].strip(), where)
+            return
+        m = re.match(r"(?i)DROP (?:COLUMN )?(?:IF EXISTS )?(?!CONSTRAINT\b)(" + IDENT + r")(?: CASCADE| RESTRICT)?$", act)
+        if m:
+            col = ident(m.group(1))
+            if self.s.column(t, tname, col, where) is not None:
+                self.s.drop_column(t, col)
+            return
+        m = re.match(r"(?i)DROP CONSTRAINT (?:IF EXISTS )?(" + IDENT + r")", act)
+        if m:
+            con = t["constraints"].pop(ident(m.group(1)), None)
+            if con and con["kind"] == "pk":
+                t["pk"] = []
+            return
+        m = re.match(r"(?i)ALTER (?:COLUMN )?(" + IDENT + r") (.*)$", act)
+        if m:
+            col = ident(m.group(1))
+            c = self.s.column(t, tname, col, where)
+            if c is None:
+                return
+            rest = m.group(2)
+            ty = re.match(r"(?i)(?:SET DATA )?TYPE (.*?)(?: USING .*| COLLATE .*)?$", rest)
+            if ty:
+                c["type"] = norm_type(ty.group(1))
+            elif re.match(r"(?i)SET NOT NULL", rest):
+                c["required"] = True
+            elif re.match(r"(?i)DROP NOT NULL", rest):
+                c["required"] = False
+            # SET/DROP DEFAULT, SET STATISTICS и т. п. структуру для документации не меняют
+            return
+        if re.match(r"(?i)(ENABLE|DISABLE|OWNER|SET|RESET|CLUSTER|VALIDATE|INHERIT|NO INHERIT|REPLICA)\b", act):
+            return
+        warn(f"{where}: {tname}: cannot parse '{act}'")
+
+
+# ---------------------------------------------------------------------------
+# Liquibase (XML)
+# ---------------------------------------------------------------------------
+
+LB_NS = "http://www.liquibase.org/xml/ns/dbchangelog"
+
+
+def _tag(el):
+    return el.tag.split("}")[-1]
+
+
+class LiquibaseParser:
+    """
+    Имена в Liquibase без кавычек сверяются без учёта регистра (QUOTE_ONLY_RESERVED_WORDS), но в документации
+    остаётся то написание, с которым таблица заведена в createTable.
+    """
+
+    def __init__(self, schema):
+        self.s = schema
+        self.lower = {}
+
+    def find(self, name, where):
+        key = self.lower.get((name or "").lower())
+        if key is None:
+            warn(f"{where}: unknown table {name}")
+        return key
+
+    def col(self, tkey, name):
+        for c in self.s.tables[tkey]["columns"]:
+            if c.lower() == (name or "").lower():
+                return c
+        return None
+
+    def run(self, master):
+        master = Path(master)
+        for f in self.includes(master):
+            self.changelog(f)
+
+    def includes(self, path, seen=None):
+        seen = seen if seen is not None else set()
+        root = ET.parse(path).getroot()
+        out = []
+        for el in root:
+            tag = _tag(el)
+            if tag == "include":
+                p = Path(el.get("file"))
+                cand = [path.parent / p, path.parent / p.name, p]
+                inc = next((c for c in cand if c.exists()), None)
+                if inc is None:
+                    warn(f"{path.name}: include not found: {p}")
+                elif inc.resolve() not in seen:
+                    seen.add(inc.resolve())
+                    out.extend(self.includes(inc, seen))
+            elif tag == "includeAll":
+                d = path.parent / el.get("path")
+                for inc in sorted(d.glob("*.xml")):
+                    out.extend(self.includes(inc, seen))
+            elif tag == "changeSet" and path not in out:
+                out.append(path)
+        return out
+
+    def changelog(self, path):
+        root = ET.parse(path).getroot()
+        for cs in root:
+            if _tag(cs) != "changeSet":
+                continue
+            where = f"{path.name} [{cs.get('id')}]"
+            for op in cs:
+                handler = getattr(self, "op_" + _tag(op), None)
+                if handler:
+                    handler(op, where)
+
+    def read_column(self, tkey, el):
+        t = self.s.tables[tkey]
+        name = self.col(tkey, el.get("name")) or el.get("name")
+        t["columns"][name] = {"type": norm_type(el.get("type")), "required": False}
+        for con in el:
+            if _tag(con) != "constraints":
+                continue
+            if con.get("nullable") == "false":
+                t["columns"][name]["required"] = True
+            if con.get("primaryKey") == "true":
+                t["pk"] = t["pk"] + [name] if t["constraints"].get("__pk_inline") else [name]
+                t["constraints"]["__pk_inline"] = {"kind": "pk"}
+                t["columns"][name]["required"] = True
+            ref = con.get("referencedTableName") or (con.get("references") or "").split("(")[0].strip()
+            if ref:
+                cname = con.get("foreignKeyName") or f"{tkey}_{name}_fkey"
+                t["constraints"][cname] = {"kind": "fk", "column": name, "ref": ref}
+
+    def op_createTable(self, op, where):
+        name = op.get("tableName")
+        self.s.create(name)
+        self.lower[name.lower()] = name
+        for col in op:
+            if _tag(col) == "column":
+                self.read_column(name, col)
+
+    def op_addColumn(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            for col in op:
+                if _tag(col) == "column":
+                    self.read_column(tkey, col)
+
+    def op_dropColumn(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if not tkey:
+            return
+        names = [op.get("columnName")] + [c.get("name") for c in op if _tag(c) == "column"]
+        for n in filter(None, names):
+            c = self.col(tkey, n)
+            if c is None:
+                warn(f"{where}: unknown column {tkey}.{n}")
+            else:
+                self.s.drop_column(self.s.tables[tkey], c)
+
+    def op_renameColumn(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            c = self.col(tkey, op.get("oldColumnName"))
+            if c is None:
+                warn(f"{where}: unknown column {tkey}.{op.get('oldColumnName')}")
+            else:
+                self.s.rename_column(self.s.tables[tkey], c, op.get("newColumnName"))
+
+    def op_renameTable(self, op, where):
+        old = self.find(op.get("oldTableName"), where)
+        if old:
+            new = op.get("newTableName")
+            self.s.rename_table(old, new)
+            for t in self.s.tables.values():
+                for con in t["constraints"].values():
+                    if con["kind"] == "fk" and con["ref"].lower() == old.lower():
+                        con["ref"] = new
+            del self.lower[old.lower()]
+            self.lower[new.lower()] = new
+
+    def op_dropTable(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            self.s.drop(tkey)
+            for t in self.s.tables.values():
+                for cname, con in list(t["constraints"].items()):
+                    if con["kind"] == "fk" and con["ref"].lower() == tkey.lower():
+                        del t["constraints"][cname]
+            del self.lower[tkey.lower()]
+
+    def op_modifyDataType(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            c = self.col(tkey, op.get("columnName"))
+            if c is None:
+                warn(f"{where}: unknown column {tkey}.{op.get('columnName')}")
+            else:
+                self.s.tables[tkey]["columns"][c]["type"] = norm_type(op.get("newDataType"))
+
+    def _nullable(self, op, where, required):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            c = self.col(tkey, op.get("columnName"))
+            if c is not None:
+                self.s.tables[tkey]["columns"][c]["required"] = required
+
+    def op_addNotNullConstraint(self, op, where):
+        self._nullable(op, where, True)
+
+    def op_dropNotNullConstraint(self, op, where):
+        self._nullable(op, where, False)
+
+    def op_addPrimaryKey(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            t = self.s.tables[tkey]
+            t["pk"] = [self.col(tkey, c.strip()) or c.strip() for c in op.get("columnNames", "").split(",")]
+            for c in t["pk"]:
+                if c in t["columns"]:
+                    t["columns"][c]["required"] = True
+
+    def op_dropPrimaryKey(self, op, where):
+        tkey = self.find(op.get("tableName"), where)
+        if tkey:
+            self.s.tables[tkey]["pk"] = []
+
+    def op_addForeignKeyConstraint(self, op, where):
+        tkey = self.find(op.get("baseTableName"), where)
+        cols = [c.strip() for c in (op.get("baseColumnNames") or "").split(",")]
+        if not tkey or len(cols) != 1:
+            return
+        col = self.col(tkey, cols[0]) or cols[0]
+        name = op.get("constraintName") or f"{tkey}_{col}_fkey"
+        self.s.tables[tkey]["constraints"][name] = {"kind": "fk", "column": col, "ref": op.get("referencedTableName")}
+
+    def op_dropForeignKeyConstraint(self, op, where):
+        tkey = self.find(op.get("baseTableName"), where)
+        if tkey and self.s.tables[tkey]["constraints"].pop(op.get("constraintName"), None) is None:
+            warn(f"{where}: unknown FK {op.get('constraintName')}")
+
+    def finish(self):
+        # FK может ссылаться на таблицу, созданную позже, - имя приводим к каноническому в конце
+        for tname, t in self.s.tables.items():
+            t["constraints"].pop("__pk_inline", None)
+            for con in t["constraints"].values():
+                if con["kind"] == "fk":
+                    key = self.lower.get(con["ref"].lower())
+                    if key is None:
+                        warn(f"{tname}.{con['column']}: FK to unknown table {con['ref']}")
+                    else:
+                        con["ref"] = key
+
+
+# ---------------------------------------------------------------------------
+# Живая база (PostgreSQL, через psql)
+# ---------------------------------------------------------------------------
+
+def psql(dsn, sql):
+    try:
+        r = subprocess.run(["psql", "-X", "-A", "-t", "-F", "\t", "-v", "ON_ERROR_STOP=1", "-d", dsn, "-c", sql],
+                           capture_output=True, text=True, check=True)
+    except FileNotFoundError:
+        sys.exit("psql (PostgreSQL client) is required")
+    except subprocess.CalledProcessError as e:
+        sys.exit(f"psql: {e.stderr.strip()}")
+    return [line.split("\t") for line in r.stdout.splitlines() if line]
+
+
+def read_db(schema, dsn, nsp):
+    q = nsp.replace("'", "''")
+    for tname, col, ctype, notnull in psql(dsn, f"""
+        SELECT c.relname, a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull
+          FROM pg_attribute a
+          JOIN pg_class c ON c.oid = a.attrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = '{q}' AND c.relkind IN ('r', 'p') AND a.attnum > 0 AND NOT a.attisdropped
+         ORDER BY c.relname, a.attnum"""):
+        t = schema.tables.get(tname) or schema.create(tname)
+        t["columns"][col] = {"type": norm_type(ctype), "required": notnull == "t"}
+
+    for tname, cname, kind, cols, ref, definition in psql(dsn, f"""
+        SELECT c.relname, k.conname, k.contype,
+               (SELECT string_agg(a.attname, ',' ORDER BY x.i)
+                  FROM unnest(k.conkey) WITH ORDINALITY x(n, i)
+                  JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = x.n),
+               coalesce(r.relname, ''), pg_get_constraintdef(k.oid)
+          FROM pg_constraint k
+          JOIN pg_class c ON c.oid = k.conrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          LEFT JOIN pg_class r ON r.oid = k.confrelid
+         WHERE n.nspname = '{q}' AND k.contype IN ('p', 'f', 'c')
+         ORDER BY c.relname, k.conname"""):
+        t = schema.tables.get(tname)
+        if t is None:
+            continue
+        cols = cols.split(",") if cols else []
+        if kind == "p":
+            t["pk"] = cols
+        elif kind == "f" and len(cols) == 1:
+            t["constraints"][cname] = {"kind": "fk", "column": cols[0], "ref": ref}
+        elif kind == "c" and len(cols) == 1:
+            m = re.match(r"(?is)^CHECK\s*\((.*)\)$", definition.strip())
+            v = check_values(m.group(1)) if m else None
+            if v and v[0] == cols[0]:
+                t["constraints"][cname] = {"kind": "values", "column": cols[0], "values": v[1]}
+
+
+# ---------------------------------------------------------------------------
+# Вывод
+# ---------------------------------------------------------------------------
+
+def flow(v):
+    text = yaml.safe_dump(v, default_flow_style=True, allow_unicode=True, width=10 ** 6, sort_keys=False).strip()
+    # у простой строки safe_dump дописывает маркер конца документа «...»
+    return text[:-3].strip() if text.endswith("\n...") else text
+
+
+def write_yaml(data, source, out):
+    lines = [
+        "# Physical DB structure. Generated by import-struct, do not edit by hand:",
+        "# descriptions go to db-desc.yaml; to regenerate, run import-struct with the same source.",
+        f"source: {flow(source)}",
+        "",
+        "tables:",
+    ]
+    for tname, t in data.items():
+        lines.append("")
+        lines.append(f"  {tname}:")
+        if "primary_key" in t:
+            lines.append(f"    primary_key: {flow(t['primary_key'])}")
+        lines.append("    columns:")
+        for cname, c in t["columns"].items():
+            lines.append(f"      {cname}: {flow(c)}")
+    Path(out).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Physical DB structure -> db-struct.yaml")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--flyway", nargs="+", metavar="DIR", help="directories with Flyway SQL migrations")
+    src.add_argument("--liquibase", metavar="MASTER", help="Liquibase master changelog (XML)")
+    src.add_argument("--db", metavar="DSN", help="PostgreSQL connection string, e.g. postgresql://user@host/db")
+    ap.add_argument("--schema", default="public", help="DB schema for --db (default: public)")
+    ap.add_argument("-o", "--out", default=str(DEFAULT_OUT), help="output file")
+    a = ap.parse_args()
+
+    schema = Schema()
+    if a.flyway:
+        FlywayParser(schema).run(a.flyway)
+        source = "flyway: " + ", ".join(a.flyway)
+    elif a.liquibase:
+        p = LiquibaseParser(schema)
+        p.run(a.liquibase)
+        p.finish()
+        source = "liquibase: " + a.liquibase
+    else:
+        read_db(schema, a.db, a.schema)
+        # пароль из строки подключения в файл не попадает
+        source = "db: " + re.sub(r"(//[^:/@]+):[^@]*@", r"\1@", a.db) + f" (schema {a.schema})"
+
+    for name in SERVICE_TABLES:
+        schema.tables.pop(name, None)
+    data = schema.to_yaml_data()
+    write_yaml(data, source, a.out)
+    print(f"{a.out}: tables {len(data)}, columns {sum(len(t['columns']) for t in data.values())}")
+
+
+if __name__ == "__main__":
+    main()

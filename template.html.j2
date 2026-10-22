@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="{{ lang }}">
+<head>
+<meta charset="UTF-8">
+<title>{{ doc.title | default(t.default_title) }}</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Arial, sans-serif; font-size: 14px; color: #222; background: #fff; padding: 24px 32px; }
+h1 { font-size: 22px; margin-bottom: 8px; }
+h2 { font-size: 17px; margin: 28px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #2688d4; color: #1a5fa0; }
+h3 { font-size: 14px; margin: 16px 0 6px; color: #444; }
+.subtitle { color: #666; margin-bottom: 20px; font-size: 13px; }
+
+/* TOC */
+.toc-section { margin-bottom: 6px; }
+.toc-section > a { font-weight: bold; color: #1a5fa0; }
+ul.toc { list-style: none; padding: 0; }
+ul.toc li { padding: 2px 0; }
+ul.toc li a { color: #1a5fa0; text-decoration: none; }
+ul.toc li a:hover { text-decoration: underline; }
+.toc-desc { color: #888; font-size: 12px; margin-left: 8px; }
+.toc-flex { display: flex; flex-wrap: wrap; flex-direction: column; max-height: 600px; gap: 2px 24px; list-style: none; padding: 0; margin: 6px 0; }
+
+/* Diagrams */
+.diagram-group { margin-bottom: 28px; }
+.diagram-group h3 { font-size: 15px; }
+.diagram-wrapper { overflow-x: auto; margin: 4px 0 12px; }
+.diagram-wrapper svg { max-width: 100%; height: auto; }
+
+/* Table section */
+.table-section { margin-bottom: 36px; }
+.table-header { display: flex; align-items: baseline; gap: 12px; margin: 24px 0 4px; }
+.table-header h2 { margin: 0; border: none; }
+.table-title { color: #555; font-size: 13px; }
+.table-desc { color: #444; margin-bottom: 6px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
+.table-diag-list { font-size: 12px; color: #888; margin-bottom: 8px; }
+.table-diag-list a { color: #2688d4; text-decoration: none; }
+.table-diag-list a:hover { text-decoration: underline; }
+
+/* Fields table */
+table.fields { border-collapse: collapse; margin-bottom: 12px; font: inherit; max-width: 50rem; }
+table.fields th { background: #e8f0fb; color: #1a5fa0; text-align: left; padding: 6px 10px; border: 1px solid #c5d5ee; font-weight: normal; }
+table.fields td { padding: 2px 10px; border: 1px solid #ddd; vertical-align: top; }
+table.fields tr:nth-child(even) td { background: #f7f9fe; }
+.col-name { color: #1a1a1a; }
+.col-type { white-space: nowrap; }
+.col-ref-link { color: #2688d4; text-decoration: none; }
+.col-ref-link:hover { text-decoration: underline; }
+.col-desc { color: #333; line-height: 1.45; white-space: pre-line; }
+.col-title { color: #1a1a1a; }
+.col-note { color: #555; }
+.col-flag { color: #888; font-size: 12px; }
+.col-values { color: #888; font-size: 12px; white-space: normal; max-width: 18rem; }
+
+/* Constants */
+table.consts { margin: 6px 0 10px; border-collapse: collapse; font-size: 12px; max-width: 40rem; }
+table.consts th { text-align: left; padding: 3px 8px; border: 1px solid #ddd; font-weight: normal; }
+table.consts td { padding: 2px 8px; border: 1px solid #ddd; }
+
+</style>
+{% block style %}{% endblock %}
+</head>
+<body>
+{% block page %}
+<h1><a id="_top"></a>{{ doc.title | default(t.default_title) }}</h1>
+{% if doc.subtitle %}<div class="subtitle">{{ doc.subtitle }}</div>{% endif %}
+
+{% block toc %}
+<h2>{{ t.contents }}</h2>
+<ul class="toc">
+{% if diagrams_doc %}
+  <li><a href="#_diagrams"><h3>{{ t.diagrams }}</h3></a>
+    <ul class="toc" style="margin-left:16px">
+    {% for gname, ginfo in diagrams_doc.items() %}
+      <li><a href="#diag_{{ gname }}">{{ ginfo.title | default(gname) }}</a></li>
+    {% endfor %}
+    </ul>
+  </li>
+{% endif %}
+  <li><a href="#_tables"><h3>{{ t.tables }} ({{ sorted_tables | length }})</h3></a>
+    <ul class="toc-flex">
+    {% for tname in sorted_tables %}
+      <li><a href="#tbl_{{ tname }}">{{ tname }}</a>
+        {% set tdoc = tables_doc.get(tname, {}) %}
+        {% if tdoc and tdoc.title %}<span class="toc-desc">{{ tdoc.title }}</span>{% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  </li>
+</ul>
+{% endblock %}
+
+{% block content %}
+{% if diagrams_doc %}
+<h2><a id="_diagrams"></a>{{ t.diagrams }}</h2>
+{% for gname, ginfo in diagrams_doc.items() %}
+<div class="diagram-group">
+  <h3><a id="diag_{{ gname }}"></a>{{ ginfo.title | default(gname) }}</h3>
+  {% if ginfo.description %}<div class="table-desc">{{ ginfo.description }}</div>{% endif %}
+  {% if group_svgs.get(gname) %}
+  <div class="diagram-wrapper">{{ group_svgs[gname] }}</div>
+  {% else %}
+  <div style="color:#999;font-size:12px">[{{ t.diagram_not_generated }}]</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endif %}
+
+<h2><a id="_tables"></a>{{ t.tables }}</h2>
+{% for tname in sorted_tables %}
+{% set tdoc = tables_doc.get(tname, {}) or {} %}
+{% set tcols = schema[tname].columns %}
+{% set tcol_order = column_order.get(tname, tcols.keys()) %}
+{% set trefs = all_refs.get(tname, {}) %}
+<div class="table-section">
+  <div class="table-header">
+    <h2><a id="tbl_{{ tname }}"></a>{{ tname }}</h2>
+    {% if tdoc.title %}<span class="table-title">{{ tdoc.title }}</span>{% endif %}
+  </div>
+  {% if tdoc.description %}<div class="table-desc">{{ tdoc.description }}</div>{% endif %}
+  {% set tbl_diagrams = [] %}
+  {% for gname, ginfo in diagrams_doc.items() if tname in (ginfo.tables or []) %}
+    {% if tbl_diagrams.append((gname, ginfo)) %}{% endif %}
+  {% endfor %}
+  {% if tbl_diagrams %}
+  <div class="table-diag-list">{{ t.diagrams }}:
+    {% for gname, ginfo in tbl_diagrams %}
+    <a href="#diag_{{ gname }}">{{ ginfo.title | default(gname) }}</a>{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <table class="fields">
+    <tr><th>{{ t.field }}</th><th>{{ t.type }}</th><th>{{ t.description }}</th></tr>
+    {% for col in tcol_order %}
+    {% set cinfo = tcols[col] or {} %}
+    {% set cdoc = (tdoc.get('columns') or {}).get(col) or {} %}
+    {% set ref = trefs.get(col) %}
+    <tr>
+      <td class="col-name">{{ col }}</td>
+      <td class="col-type">{{ cinfo.type }}
+        {%- if col in schema[tname].pk %} <span class="col-flag">PK</span>{% elif cinfo.required %} <span class="col-flag">not null</span>{% endif %}
+        {%- if ref %} ({{ t.references }}: <a class="col-ref-link" href="#tbl_{{ ref }}">{{ ref }}</a>){% endif %}
+        {%- set cvalues = cinfo.get('values') %}
+        {%- if cvalues %}<div class="col-values">{{ cvalues | join(', ') }}</div>{% endif %}</td>
+      <td class="col-desc">
+        {%- if cdoc.title %}<span class="col-title">{{ cdoc.title }}</span>{% endif %}
+        {%- if cdoc.description %}{% if cdoc.title %}<div class="col-note">{% endif %}{{ cdoc.description }}{% if cdoc.title %}</div>{% endif %}{% endif %}
+        {% set cconsts = col_constants.get(tname, {}).get(col) %}
+        {% if cconsts %}
+        <table class="consts">
+          {% for cv in cconsts %}
+          <tr><td>{{ cv.name }}</td><td>{{ cv.value }}</td><td>{{ cv.description }}</td></tr>
+          {% endfor %}
+        </table>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  {% if table_constants.get(tname) %}
+  <h3>{{ t.constants }}</h3>
+  <div class="table-diag-list">{{ t.source }}: <code>{{ tdoc.constants_from }}</code></div>
+  <table class="consts">
+    <tr><th>{{ t.name }}</th><th>{{ t.value }}</th><th>{{ t.description }}</th></tr>
+    {% for c in table_constants[tname] %}
+    <tr><td>{{ c.name }}</td><td>{{ c.value }}</td><td>{{ c.description }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+
+  {% if table_svgs.get(tname) %}
+  <h3>{{ t.relationships }}</h3>
+  <div class="diagram-wrapper">{{ table_svgs[tname] }}</div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}
+{% endblock %}
+
+</body>
+</html>

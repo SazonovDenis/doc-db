@@ -1,0 +1,15 @@
+# Подписи HTML, русский. Ключи, которых здесь нет, берутся из en.yaml
+default_title: Документация по базе данных
+contents: Содержание
+diagrams: Диаграммы
+tables: Таблицы
+diagram_not_generated: диаграмма не сгенерирована
+constants: Константы
+source: Источник
+name: Имя
+value: Значение
+description: Описание
+field: Поле
+type: Тип
+references: ссылка
+relationships: Связи

@@ -1,0 +1,535 @@
+#!/usr/bin/env python3
+"""
+gen-html - HTML-документация по БД (db.html) из файлов doc/db проекта (--doc; проект - текущий каталог или --root):
+
+    db-struct.yaml  физическая структура (генерирует import-struct из Flyway, Liquibase или живой базы);
+    db-desc.yaml    описания (правит человек), накладываются на структуру;
+    db-consts.yaml константы Java-классов из constants_from (генерирует import-consts), если они используются.
+
+constants_from - Java-класс (FQN) или файл .tsv (путь от корня проекта): строки файла без заголовка,
+колонки - значение, название, пояснение.
+
+Перед генерацией проверяется, что в db-desc.yaml нет лишнего: таблиц и колонок, которых нет в структуре,
+неизвестных ключей, таблиц диаграмм не из структуры. Есть лишнее - HTML не генерируется, код выхода 1. С --strict то же для неописанных таблиц и колонок.
+
+    gen-html                                   _site/db.html по template.html.j2 (отдельная страница, без навигации сайта)
+    gen-html -ru | --lang XX                   подписи на другом языке: lang/XX.yaml (-en - английские, по умолчанию);
+                                             --labels FILE - свои подписи поверх
+    gen-html -t FILE -o FILE [-D NAME=VALUE]   другой шаблон (может расширять template.html.j2) и выходной файл;
+                                             -D - переменная шаблона, можно несколько
+"""
+import argparse
+import hashlib
+import sys
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+import yaml
+from jinja2 import Environment, FileSystemLoader
+
+SCRIPT_DIR = Path(__file__).parent.resolve()
+PROJECT_ROOT = Path.cwd()  # корень проекта: запуск из него или --root
+DATA_DIR = Path("doc") / "db"  # документация БД: yaml-файлы, от корня проекта или --doc
+STRUCT_FILE = YAML_FILE = CONSTS_FILE = None  # задаются в main
+TEMPLATE_FILE = SCRIPT_DIR / "template.html.j2"
+# подписи HTML по языкам: lang/<язык>.yaml, базовый - en (недостающие ключи берутся из него)
+LANG_DIR = SCRIPT_DIR / "lang"
+BASE_LANG = "en"
+OUTPUT_FILE = Path("_site") / "db.html"
+# SVG диаграмм по sha1 исходника PlantUML: java на каждую диаграмму - десятки секунд на сборку.
+# В корне проекта: неиспользованные SVG после сборки удаляются
+PLANTUML_CACHE = None
+used_cache = set()  # файлы кэша, нужные этой сборке; остальные после неё удаляются
+
+# PlantUML - только свой, в lib утилиты
+PLANTUML_JAR = SCRIPT_DIR / "lib" / "plantuml.jar"
+
+# Ключи, которые может содержать db-desc.yaml; всё остальное - опечатка или устаревшее
+DOC_KEYS = {"title", "subtitle", "diagrams", "tables"}
+DIAGRAM_KEYS = {"title", "description", "tables"}
+TABLE_KEYS = {"title", "description", "columns", "constants_from"}
+COLUMN_KEYS = {"title", "description", "constants_from"}
+
+
+# ---------------------------------------------------------------------------
+# Загрузка
+# ---------------------------------------------------------------------------
+
+def load_yaml(path, hint):
+    if not path.exists():
+        sys.exit(f"File not found: {path.name}: {hint}")
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_struct():
+    """
+    Returns dict: table_name -> {
+      columns: {col_name -> {type, required, references, values}},   # в физическом порядке
+      pk:      [col_name, ...],
+    }
+    """
+    raw = load_yaml(STRUCT_FILE, "generate it with import-struct first")
+    schema = {}
+    for tname, t in (raw.get("tables") or {}).items():
+        t = t or {}
+        schema[tname] = {"columns": dict(t.get("columns") or {}), "pk": list(t.get("primary_key") or [])}
+    return schema
+
+
+def build_all_refs(schema):
+    """table_name -> {col -> ref_table}: ссылки (FK) из структуры."""
+    return {tname: {c: info["references"] for c, info in t["columns"].items() if (info or {}).get("references")}
+            for tname, t in schema.items()}
+
+
+# ---------------------------------------------------------------------------
+# Проверка db-desc.yaml: ничего лишнего
+# ---------------------------------------------------------------------------
+
+def check_doc(schema, doc, strict=False):
+    """Лишнее в db-desc.yaml - ошибка; неописанное - счётчик, а при strict - тоже ошибка со списком."""
+    errors = []
+    missing = []
+
+    def keys(where, d, allowed):
+        if not isinstance(d, dict):
+            errors.append(f"  [bad value]      {where}: mapping expected")
+            return False
+        for k in sorted(set(d) - allowed):
+            errors.append(f"  [unknown key]    {where}: {k}")
+        return True
+
+    keys("<file>", doc, DOC_KEYS)
+
+    for gname, g in (doc.get("diagrams") or {}).items():
+        if keys(f"diagrams.{gname}", g, DIAGRAM_KEYS):
+            for t in g.get("tables") or []:
+                if t not in schema:
+                    errors.append(f"  [extra table]    diagrams.{gname}: {t}  (not in schema)")
+
+    undocumented = 0
+    tables_doc = doc.get("tables") or {}
+    for tname, tdoc in tables_doc.items():
+        if tname not in schema:
+            errors.append(f"  [extra table]    {tname}  (not in schema)")
+            continue
+        tdoc = tdoc or {}
+        if not keys(tname, tdoc, TABLE_KEYS):
+            continue
+        cols = tdoc.get("columns") or {}
+        for cname, cdoc in cols.items():
+            if cname not in schema[tname]["columns"]:
+                errors.append(f"  [extra column]   {tname}.{cname}  (not in schema)")
+            elif cdoc is not None and not isinstance(cdoc, str):
+                keys(f"{tname}.{cname}", cdoc, COLUMN_KEYS)
+        undoc_cols = [c for c in schema[tname]["columns"] if c not in cols]
+        undocumented += len(undoc_cols)
+        missing += [f"  [missing column] {tname}.{c}" for c in undoc_cols]
+    for t in sorted(set(schema) - set(tables_doc)):
+        undocumented += len(schema[t]["columns"])
+        missing.append(f"  [missing table]  {t}")
+    if strict:
+        errors += missing
+
+    if errors:
+        print("ERRORS in db-desc.yaml:")
+        print("\n".join(errors))
+        sys.exit(1)
+    missing_tables = len(set(schema) - set(tables_doc))
+    if missing_tables or undocumented:
+        print(f"Undocumented: tables {missing_tables}, columns {undocumented}")
+
+
+def normalize_doc(doc):
+    """Колонку можно описать строкой вместо {description: ...}."""
+    for tdoc in (doc.get("tables") or {}).values():
+        for cname, cdoc in list(((tdoc or {}).get("columns") or {}).items()):
+            if isinstance(cdoc, str):
+                tdoc["columns"][cname] = {"description": cdoc}
+    return doc
+
+
+
+# ---------------------------------------------------------------------------
+# Константы Java-классов (db-consts.yaml)
+# ---------------------------------------------------------------------------
+
+def is_tsv(source):
+    return source.endswith(".tsv")
+
+
+def load_tsv(path):
+    """Строки .tsv без заголовка: [{name, value, description}] по первым трём колонкам."""
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+        if not line.strip():
+            continue
+        cells = line.split("\t") + ["", "", ""]
+        rows.append({"name": cells[0], "value": cells[1], "description": cells[2]})
+    return rows
+
+
+def load_consts(doc):
+    """
+    {source -> [{name, value, description}]}: source - FQN или путь к .tsv из constants_from.
+    Классы - из db-consts.yaml, он нужен, только если в constants_from есть классы; класса нет в файле -
+    ошибка: db-consts.yaml устарел. Файла .tsv нет - ошибка.
+    """
+    used = []
+    for tname, tdoc in (doc.get("tables") or {}).items():
+        tdoc = tdoc or {}
+        if tdoc.get("constants_from"):
+            used.append((tname, tdoc["constants_from"]))
+        for cname, cdoc in (tdoc.get("columns") or {}).items():
+            if isinstance(cdoc, dict) and cdoc.get("constants_from"):
+                used.append((f"{tname}.{cname}", cdoc["constants_from"]))
+    consts = {}
+    missing_tsv = []
+    for where, source in used:
+        if is_tsv(source) and source not in consts:
+            path = PROJECT_ROOT / source
+            if path.exists():
+                consts[source] = load_tsv(path)
+            else:
+                missing_tsv.append(f"  [no file]        {where}: {source}")
+    if missing_tsv:
+        print("ERRORS: .tsv files from constants_from not found (paths are relative to the project root):")
+        print("\n".join(missing_tsv))
+        sys.exit(1)
+
+    classes = [(where, source) for where, source in used if not is_tsv(source)]
+    if not classes:
+        return consts
+
+    raw = load_yaml(CONSTS_FILE, "db-desc.yaml has constants_from - generate it with import-consts")
+    java = {fqn: (info or {}).get("constants") or [] for fqn, info in (raw.get("classes") or {}).items()}
+    missing = [f"  [no constants]   {where}: {fqn}" for where, fqn in classes if fqn not in java]
+    if missing:
+        print("ERRORS: classes missing from db-consts.yaml (regenerate it with import-consts):")
+        print("\n".join(missing))
+        sys.exit(1)
+    consts.update(java)
+    return consts
+
+
+def resolve_constants(doc, consts):
+    """
+    Returns (table_constants, col_constants).
+    table_constants: {tname -> [{name, value, description}]}
+    col_constants:   {tname -> {colname -> [{name, value, description}]}}
+    """
+    table_constants = {}
+    col_constants = {}
+    for tname, tdoc in (doc.get("tables") or {}).items():
+        if not tdoc:
+            continue
+        fqn = tdoc.get("constants_from")
+        if fqn and consts.get(fqn):
+            table_constants[tname] = consts[fqn]
+        for cname, cdoc in (tdoc.get("columns") or {}).items():
+            if not isinstance(cdoc, dict):
+                continue
+            fqn = cdoc.get("constants_from")
+            if fqn and consts.get(fqn):
+                col_constants.setdefault(tname, {})[cname] = consts[fqn]
+    return table_constants, col_constants
+
+
+# ---------------------------------------------------------------------------
+# PlantUML helpers
+# ---------------------------------------------------------------------------
+
+def find_plantuml():
+    return str(PLANTUML_JAR) if PLANTUML_JAR.exists() else None
+
+
+def run_plantuml(puml_text):
+    """Run plantuml on puml_text, return SVG string or None. Результат кэшируется в PLANTUML_CACHE."""
+    cached = PLANTUML_CACHE / (hashlib.sha1(puml_text.encode("utf-8")).hexdigest() + ".svg")
+    used_cache.add(cached.name)
+    if cached.exists():
+        return cached.read_text(encoding="utf-8")
+    jar = find_plantuml()
+    if jar is None:
+        return None
+    svg = _render_plantuml(jar, puml_text)
+    if svg:
+        PLANTUML_CACHE.mkdir(parents=True, exist_ok=True)
+        cached.write_text(svg, encoding="utf-8")
+    return svg
+
+
+def _render_plantuml(jar, puml_text):
+    with tempfile.NamedTemporaryFile(suffix=".puml", delete=False, mode="w", encoding="utf-8") as f:
+        f.write(puml_text)
+        tmp = f.name
+    svg_path = tmp.replace(".puml", ".svg")
+    try:
+        subprocess.run(
+            ["java", "-jar", jar, "-tsvg", "-quiet", tmp],
+            check=True, capture_output=True
+        )
+        if os.path.exists(svg_path):
+            with open(svg_path, encoding="utf-8") as f:
+                svg = f.read()
+            # strip XML declaration and DOCTYPE
+            svg = re.sub(r"<\?xml[^>]*\?>", "", svg)
+            svg = re.sub(r"<!DOCTYPE[^>]*>", "", svg)
+            return svg.strip()
+    except Exception:
+        pass
+    finally:
+        os.unlink(tmp)
+        if os.path.exists(svg_path):
+            os.unlink(svg_path)
+    return None
+
+
+PUML_HEADER = """\
+@startuml
+hide circle
+hide empty members
+skinparam roundcorner 5
+skinparam shadowing false
+skinparam class {
+  BackgroundColor white
+  ArrowColor #2688d4
+  BorderColor #2688d4
+}
+"""
+
+PUML_FOCAL_COLOR = "#back:lightblue"
+
+
+def _tbl_url(tname):
+    return f"[[#tbl_{tname}]]"
+
+
+def _puml_text(text):
+    """Одна строка без кавычек и угловых скобок: < > - разметка Creole, " - конец имени класса."""
+    line = (text or "").strip().split("\n")[0].strip()
+    return line.replace('"', "'").replace("<", "‹").replace(">", "›")
+
+
+def _puml_class(tname, tables_doc, color=""):
+    """Заголовок класса: имя таблицы, под ним серым её title из db-desc.yaml."""
+    title = _puml_text((tables_doc.get(tname) or {}).get("title"))
+    label = f"<b>{tname}</b>\\n<color:gray>{title}</color>" if title else tname
+    return f'class "{label}" as {tname} {_tbl_url(tname)} {color} {{'
+
+
+def _col_title(tdoc, col):
+    """title колонки из db-desc.yaml, нет - description."""
+    cdoc = (tdoc.get("columns") or {}).get(col) or {}
+    return _puml_text(cdoc.get("title") or cdoc.get("description"))
+
+
+def puml_refs_diagram(focal_table, tables, all_refs, tables_doc):
+    """Per-table refs diagram: focal + neighbors."""
+    incoming = {}  # table -> [col]
+    for tname, refs in all_refs.items():
+        if tname == focal_table:
+            continue
+        for col, ref in refs.items():
+            if ref == focal_table:
+                incoming.setdefault(tname, []).append(col)
+
+    outgoing = all_refs.get(focal_table, {})
+
+    involved = {focal_table} | set(incoming) | set(outgoing.values())
+    if len(involved) == 1:
+        return None  # isolated table, skip diagram
+
+    lines = [PUML_HEADER]
+    for t in sorted(involved):
+        color = PUML_FOCAL_COLOR if t == focal_table else ""
+        lines.append(_puml_class(t, tables_doc, color))
+        lines.append('}')
+
+    for t, cols in incoming.items():
+        for col in cols:
+            lines.append(f"{t} --> {focal_table} : {col}")
+
+    for col, ref in outgoing.items():
+        if ref in tables:
+            lines.append(f"{focal_table} --> {ref} : {col}")
+
+    lines.append("@enduml")
+    return "\n".join(lines)
+
+
+def puml_group_diagram(group_tables, tables, all_refs, column_order, tables_doc):
+    """Multi-table diagram: show selected tables with their columns and FK arrows."""
+    group_set = set(group_tables)
+    lines = [PUML_HEADER]
+
+    for tname in group_tables:
+        if tname not in tables:
+            continue
+        cols = tables[tname]["columns"]
+        refs = all_refs.get(tname, {})
+        tdoc = tables_doc.get(tname) or {}
+        lines.append(_puml_class(tname, tables_doc))
+        for col in column_order.get(tname, cols.keys()):
+            # {field}: скобки в title не превращают поле в метод (отдельный раздел класса)
+            line = f"  {{field}} {col}"
+            title = _col_title(tdoc, col)
+            if title:
+                line += f" <color:gray>{title}</color>"
+            ref = refs.get(col)
+            if ref:
+                line += f" [[#tbl_{ref} → {ref}]]"
+            lines.append(line)
+        lines.append("}")
+
+    for tname in group_tables:
+        if tname not in tables:
+            continue
+        refs = all_refs.get(tname, {})
+        for col, ref in refs.items():
+            if ref in group_set:
+                lines.append(f"{tname} --> {ref} : {col}")
+
+    lines.append("@enduml")
+    return "\n".join(lines)
+
+
+def order_columns(cols, pk, tdoc, refs):
+    """
+    Порядок колонок: первичный ключ, затем как перечислены в db-desc.yaml, остальные - ссылки (FK) по алфавиту,
+    затем прочие по алфавиту.
+    """
+    ids = [c for c in pk if c in cols]
+    doc_order = [c for c in (tdoc.get("columns") or {}) if c in cols and c not in ids]
+    rest = [c for c in cols if c not in ids and c not in doc_order]
+    fks = sorted(c for c in rest if c in refs)
+    others = sorted(c for c in rest if c not in refs)
+    return ids + doc_order + fks + others
+
+
+# ---------------------------------------------------------------------------
+# HTML generation
+# ---------------------------------------------------------------------------
+
+def generate_html(schema, all_refs, doc, consts, template_file, output_file, variables):
+    tables_doc = doc.get("tables") or {}
+    diagrams_doc = doc.get("diagrams") or {}
+    table_constants, col_constants = resolve_constants(doc, consts)
+
+    column_order = {}
+    for tname in schema:
+        tdoc = tables_doc.get(tname) or {}
+        column_order[tname] = order_columns(schema[tname]["columns"], schema[tname]["pk"], tdoc, all_refs.get(tname, {}))
+
+    # generate per-table ref diagrams
+    table_svgs = {}
+    for tname in sorted(schema):
+        puml = puml_refs_diagram(tname, schema, all_refs, tables_doc)
+        if puml:
+            svg = run_plantuml(puml)
+            if svg:
+                table_svgs[tname] = svg
+
+    # generate group diagrams
+    group_svgs = {}
+    for gname, ginfo in diagrams_doc.items():
+        gtables = ginfo.get("tables", [])
+        puml = puml_group_diagram(gtables, schema, all_refs, column_order, tables_doc)
+        if puml:
+            svg = run_plantuml(puml)
+            if svg:
+                group_svgs[gname] = svg
+
+    if PLANTUML_CACHE.exists():
+        for f in PLANTUML_CACHE.glob("*.svg"):
+            if f.name not in used_cache:
+                f.unlink()
+
+    if find_plantuml() is None:
+        print(f"PlantUML not found ({PLANTUML_JAR}) - no diagrams")
+
+    # Каталог шаблона, затем SCRIPT_DIR: свой шаблон может расширять template.html.j2
+    env = Environment(loader=FileSystemLoader([str(template_file.parent), str(SCRIPT_DIR)]), autoescape=False,
+                      trim_blocks=True, lstrip_blocks=True)
+    tmpl = env.get_template(template_file.name)
+
+    html = tmpl.render(
+        doc=doc,
+        schema=schema,
+        all_refs=all_refs,
+        tables_doc=tables_doc,
+        diagrams_doc=diagrams_doc,
+        sorted_tables=sorted(schema.keys()),
+        table_svgs=table_svgs,
+        group_svgs=group_svgs,
+        table_constants=table_constants,
+        col_constants=col_constants,
+        column_order=column_order,
+        **variables,
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(html, encoding="utf-8")
+    print(f"Generated: {output_file}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def load_labels(lang, labels_file):
+    """Переменные шаблона для подписей: t - словарь подписей (base, затем язык, затем свой файл), lang - код языка."""
+    lang = lang or BASE_LANG
+    t = {}
+    for path in (LANG_DIR / f"{BASE_LANG}.yaml", LANG_DIR / f"{lang}.yaml", labels_file):
+        if path:
+            t.update(load_yaml(path, "labels file") or {})
+    return {"t": t, "lang": lang}
+
+
+def parse_var(s):
+    name, sep, value = s.partition("=")
+    if not sep or not name:
+        raise argparse.ArgumentTypeError(f"NAME=VALUE expected: {s}")
+    return name, value
+
+
+def main():
+    ap = argparse.ArgumentParser(description="HTML DB documentation from db-struct.yaml, db-desc.yaml and db-consts.yaml")
+    langs = sorted(p.stem for p in LANG_DIR.glob("*.yaml"))
+    lang = ap.add_mutually_exclusive_group()
+    lang.add_argument("--lang", choices=langs, help=f"label language: lang/<lang>.yaml (default: {BASE_LANG})")
+    lang.add_argument("-en", dest="lang", action="store_const", const="en", help="English labels, same as --lang en")
+    lang.add_argument("-ru", dest="lang", action="store_const", const="ru", help="Russian labels, same as --lang ru")
+    ap.add_argument("--labels", type=Path, help="yaml with own labels over the language ones")
+    ap.add_argument("-t", "--template", type=Path, default=TEMPLATE_FILE,
+                    help="own Jinja template; may extend template.html.j2 (default: template.html.j2)")
+    ap.add_argument("-o", "--output", type=Path, help="output file (default: _site/db.html under the project root)")
+    ap.add_argument("-D", dest="vars", type=parse_var, action="append", default=[], metavar="NAME=VALUE",
+                    help="template variable")
+    ap.add_argument("--root", type=Path, help="project root: .tsv paths from constants_from are relative to it (default: current directory)")
+    ap.add_argument("--doc", type=Path, help="directory of db-struct.yaml, db-desc.yaml, db-consts.yaml (default: doc/db)")
+    ap.add_argument("--strict", action="store_true", help="undocumented tables and columns are errors")
+    args = ap.parse_args()
+
+    global PROJECT_ROOT, STRUCT_FILE, YAML_FILE, CONSTS_FILE, PLANTUML_CACHE
+    if args.root:
+        PROJECT_ROOT = args.root.resolve()
+    data_dir = args.doc or PROJECT_ROOT / DATA_DIR
+    STRUCT_FILE, YAML_FILE, CONSTS_FILE = (data_dir / f for f in ("db-struct.yaml", "db-desc.yaml", "db-consts.yaml"))
+    args.output = args.output or PROJECT_ROOT / OUTPUT_FILE
+    PLANTUML_CACHE = PROJECT_ROOT / ".plantuml-cache"
+
+    schema = load_struct()
+    doc = load_yaml(YAML_FILE, "create it (may be empty: title and tables)")
+    check_doc(schema, doc, args.strict)
+    consts = load_consts(doc)
+    generate_html(schema, build_all_refs(schema), normalize_doc(doc), consts,
+                  args.template.resolve(), args.output.resolve(), load_labels(args.lang, args.labels) | dict(args.vars))
+
+
+if __name__ == "__main__":
+    main()

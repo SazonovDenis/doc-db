@@ -1,0 +1,15 @@
+# HTML labels, English. Base language: other languages fall back to it for missing keys
+default_title: Database documentation
+contents: Contents
+diagrams: Diagrams
+tables: Tables
+diagram_not_generated: diagram not generated
+constants: Constants
+source: Source
+name: Name
+value: Value
+description: Description
+field: Field
+type: Type
+references: references
+relationships: Relationships
