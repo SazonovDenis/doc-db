@@ -5,11 +5,11 @@ diagrams: Диаграммы
 tables: Таблицы
 diagram_not_generated: диаграмма не сгенерирована
 constants: Константы
+predefined: Предустановленные значения
 source: Источник
 name: Имя
 value: Значение
 description: Описание
 field: Поле
 type: Тип
-references: ссылка
 relationships: Связи

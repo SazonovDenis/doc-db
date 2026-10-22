@@ -295,6 +295,8 @@ hide circle
 hide empty members
 skinparam roundcorner 5
 skinparam shadowing false
+' ссылки на таблицы - цветом имени таблицы в HTML (--c-head в template.html.j2)
+skinparam hyperlinkColor #1a5fa0
 skinparam class {
   BackgroundColor white
   ArrowColor #2688d4
@@ -302,11 +304,6 @@ skinparam class {
 }
 """
 
-PUML_FOCAL_COLOR = "#back:lightblue"
-
-
-def _tbl_url(tname):
-    return f"[[#tbl_{tname}]]"
 
 
 def _puml_text(text):
@@ -315,11 +312,16 @@ def _puml_text(text):
     return line.replace('"', "'").replace("<", "‹").replace(">", "›")
 
 
-def _puml_class(tname, tables_doc, color=""):
-    """Заголовок класса: имя таблицы, под ним серым её title из db-desc.yaml."""
+def _puml_class(tname, tables_doc, link=True):
+    """
+    Заголовок класса: имя таблицы, под ним серым её title из db-desc.yaml. Ссылка - только на имени в заголовке:
+    ссылка на классе делает кликабельной всю рамку с полями. link=False - без ссылки, имя цветом ссылок на таблицы
+    (центральная таблица схемы связей).
+    """
     title = _puml_text((tables_doc.get(tname) or {}).get("title"))
-    label = f"<b>{tname}</b>\\n<color:gray>{title}</color>" if title else tname
-    return f'class "{label}" as {tname} {_tbl_url(tname)} {color} {{'
+    name = f"<b>[[#tbl_{tname} {tname}]]</b>" if link else f"<b><color:#1a5fa0>{tname}</color></b>"
+    label = f"{name}\\n<color:gray>{title}</color>" if title else name
+    return f'class "{label}" as {tname} {{'
 
 
 def _col_title(tdoc, col):
@@ -346,8 +348,8 @@ def puml_refs_diagram(focal_table, tables, all_refs, tables_doc):
 
     lines = [PUML_HEADER]
     for t in sorted(involved):
-        color = PUML_FOCAL_COLOR if t == focal_table else ""
-        lines.append(_puml_class(t, tables_doc, color))
+        focal = t == focal_table
+        lines.append(_puml_class(t, tables_doc, link=not focal))
         lines.append('}')
 
     for t, cols in incoming.items():
@@ -374,7 +376,10 @@ def puml_group_diagram(group_tables, tables, all_refs, column_order, tables_doc)
         refs = all_refs.get(tname, {})
         tdoc = tables_doc.get(tname) or {}
         lines.append(_puml_class(tname, tables_doc))
+        pk = tables[tname]["pk"]
         for col in column_order.get(tname, cols.keys()):
+            if col in pk:
+                continue  # первичный ключ на диаграмме не показывается
             # {field}: скобки в title не превращают поле в метод (отдельный раздел класса)
             line = f"  {{field}} {col}"
             title = _col_title(tdoc, col)
@@ -382,7 +387,7 @@ def puml_group_diagram(group_tables, tables, all_refs, column_order, tables_doc)
                 line += f" <color:gray>{title}</color>"
             ref = refs.get(col)
             if ref:
-                line += f" [[#tbl_{ref} → {ref}]]"
+                line += f" <size:19>→</size> [[#tbl_{ref} {ref}]]"  # стрелка - вне ссылки; крупнее, иначе прижата к низу строки
             lines.append(line)
         lines.append("}")
 

@@ -4,58 +4,71 @@
 <meta charset="UTF-8">
 <title>{{ doc.title | default(t.default_title) }}</title>
 <style>
+/* Размеры шрифта - пять:
+   --fs-1 общий заголовок, --fs-2 заголовки разделов и имя таблицы, --fs-3 подразделы,
+   --fs-4 основной текст (описания, флаги, подписи), --fs-5 мелкий - только содержимое констант / .tsv.
+   Цвета: --c-main главное, --c-second второстепенное, --c-link ссылки; имя таблицы и разделы - --c-head */
+:root {
+  --fs-1: 22px; --fs-2: 17px; --fs-3: 15px; --fs-4: 14px; --fs-5: 12px;
+  --c-main: #222; --c-second: #777; --c-link: #2688d4; --c-head: #1a5fa0;
+}
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: Arial, sans-serif; font-size: 14px; color: #222; background: #fff; padding: 24px 32px; }
-h1 { font-size: 22px; margin-bottom: 8px; }
-h2 { font-size: 17px; margin: 28px 0 8px; padding-bottom: 4px; border-bottom: 2px solid #2688d4; color: #1a5fa0; }
-h3 { font-size: 14px; margin: 16px 0 6px; color: #444; }
-.subtitle { color: #666; margin-bottom: 20px; font-size: 13px; }
+body { font-family: Arial, sans-serif; font-size: var(--fs-4); color: var(--c-main); background: #fff; padding: 24px 32px; }
+/* имена файлов и классов - той же гарнитурой, что и текст */
+code { font-family: inherit; font-size: 1em; }
+a { color: var(--c-link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+h1 { font-size: var(--fs-1); margin-bottom: 8px; }
+h2 { font-size: var(--fs-2); margin: 28px 0 8px; padding-bottom: 4px; border-bottom: 2px solid var(--c-link); color: var(--c-head); }
+h3 { font-size: var(--fs-3); margin: 16px 0 6px; color: var(--c-main); }
+.subtitle { color: var(--c-second); margin-bottom: 20px; }
 
 /* TOC */
 .toc-section { margin-bottom: 6px; }
-.toc-section > a { font-weight: bold; color: #1a5fa0; }
+.toc-section > a { font-weight: bold; color: var(--c-head); }
 ul.toc { list-style: none; padding: 0; }
 ul.toc li { padding: 2px 0; }
-ul.toc li a { color: #1a5fa0; text-decoration: none; }
-ul.toc li a:hover { text-decoration: underline; }
-.toc-desc { color: #888; font-size: 12px; margin-left: 8px; }
+ul.toc li a { color: var(--c-head); }
+.toc-desc { color: var(--c-second); margin-left: 8px; }
 .toc-flex { display: flex; flex-wrap: wrap; flex-direction: column; max-height: 600px; gap: 2px 24px; list-style: none; padding: 0; margin: 6px 0; }
 
 /* Diagrams */
 .diagram-group { margin-bottom: 28px; }
-.diagram-group h3 { font-size: 15px; }
 .diagram-wrapper { overflow-x: auto; margin: 4px 0 12px; }
 .diagram-wrapper svg { max-width: 100%; height: auto; }
+.diagram-missing { color: var(--c-second); }
 
 /* Table section */
 .table-section { margin-bottom: 36px; }
 .table-header { display: flex; align-items: baseline; gap: 12px; margin: 24px 0 4px; }
 .table-header h2 { margin: 0; border: none; }
-.table-title { color: #555; font-size: 13px; }
-.table-desc { color: #444; margin-bottom: 6px; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
-.table-diag-list { font-size: 12px; color: #888; margin-bottom: 8px; }
-.table-diag-list a { color: #2688d4; text-decoration: none; }
-.table-diag-list a:hover { text-decoration: underline; }
+.table-title { color: var(--c-main); }
+.table-desc { color: var(--c-main); font-style: italic; margin-bottom: 6px; line-height: 1.5; white-space: pre-wrap; }
+.table-diag-list { color: var(--c-main); margin-bottom: 8px; }
+.consts-source { font-weight: normal; color: var(--c-second); margin-left: 8px; }
+.col-consts-title { margin-top: 4px; color: var(--c-main); }
 
 /* Fields table */
+/* ссылка на таблицу - цветом имени таблицы */
+.col-ref-link { font-weight: bold; color: var(--c-head); }
 table.fields { border-collapse: collapse; margin-bottom: 12px; font: inherit; max-width: 50rem; }
-table.fields th { background: #e8f0fb; color: #1a5fa0; text-align: left; padding: 6px 10px; border: 1px solid #c5d5ee; font-weight: normal; }
-table.fields td { padding: 2px 10px; border: 1px solid #ddd; vertical-align: top; }
-table.fields tr:nth-child(even) td { background: #f7f9fe; }
-.col-name { color: #1a1a1a; }
+table.fields th { background: #e8f0fb; color: var(--c-main); text-align: left; padding: 6px 10px; border: 1px solid #c5d5ee; font-weight: normal; }
+/* line-height - как у строки со стрелкой ссылки (.col-arrow): все строки одной высоты; отступ снизу меньше -
+   под буквами без выносных элементов и так пусто, иначе строка выглядит приподнятой */
+table.fields td { padding: 3px 10px 0; border: 1px solid #ddd; vertical-align: top; line-height: 1.6; color: var(--c-main); }
 .col-type { white-space: nowrap; }
-.col-ref-link { color: #2688d4; text-decoration: none; }
-.col-ref-link:hover { text-decoration: underline; }
-.col-desc { color: #333; line-height: 1.45; white-space: pre-line; }
-.col-title { color: #1a1a1a; }
-.col-note { color: #555; }
-.col-flag { color: #888; font-size: 12px; }
-.col-values { color: #888; font-size: 12px; white-space: normal; max-width: 18rem; }
+/* стрелка ссылки крупнее текста, как на диаграммах; line-height - чтобы не раздувала строку;
+   top - символ → сидит низко, поднимаем к середине строчных букв */
+.col-arrow { font-size: 1.6em; line-height: 1; vertical-align: middle; position: relative; top: -0.2em; }
+.col-note { color: var(--c-main); font-style: italic; white-space: pre-line; }
+.col-flag { color: var(--c-second); }
+.col-values { color: var(--c-second); white-space: normal; max-width: 18rem; }
 
-/* Constants */
-table.consts { margin: 6px 0 10px; border-collapse: collapse; font-size: 12px; max-width: 40rem; }
-table.consts th { text-align: left; padding: 3px 8px; border: 1px solid #ddd; font-weight: normal; }
-table.consts td { padding: 2px 8px; border: 1px solid #ddd; }
+/* Constants: содержимое - мелким */
+table.consts { margin: 6px 0 10px; border-collapse: collapse; font-size: var(--fs-5); max-width: 40rem; }
+table.consts th { text-align: left; padding: 3px 8px; border: 1px solid #ddd; font-weight: normal; color: var(--c-main); }
+table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main); }
+.col-desc table.consts { margin: 2px 0 6px; line-height: 1.4; }
 
 </style>
 {% block style %}{% endblock %}
@@ -100,7 +113,7 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; }
   {% if group_svgs.get(gname) %}
   <div class="diagram-wrapper">{{ group_svgs[gname] }}</div>
   {% else %}
-  <div style="color:#999;font-size:12px">[{{ t.diagram_not_generated }}]</div>
+  <div class="diagram-missing">[{{ t.diagram_not_generated }}]</div>
   {% endif %}
 </div>
 {% endfor %}
@@ -140,14 +153,15 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; }
       <td class="col-name">{{ col }}</td>
       <td class="col-type">{{ cinfo.type }}
         {%- if col in schema[tname].pk %} <span class="col-flag">PK</span>{% elif cinfo.required %} <span class="col-flag">not null</span>{% endif %}
-        {%- if ref %} ({{ t.references }}: <a class="col-ref-link" href="#tbl_{{ ref }}">{{ ref }}</a>){% endif %}
+        {%- if ref %} <span class="col-arrow">→</span> <a class="col-ref-link" href="#tbl_{{ ref }}">{{ ref }}</a>{% endif %}
         {%- set cvalues = cinfo.get('values') %}
         {%- if cvalues %}<div class="col-values">{{ cvalues | join(', ') }}</div>{% endif %}</td>
       <td class="col-desc">
-        {%- if cdoc.title %}<span class="col-title">{{ cdoc.title }}</span>{% endif %}
-        {%- if cdoc.description %}{% if cdoc.title %}<div class="col-note">{% endif %}{{ cdoc.description }}{% if cdoc.title %}</div>{% endif %}{% endif %}
+        {%- if cdoc.title %}<div>{{ cdoc.title }}</div>{% endif %}
+        {%- if cdoc.description %}<div class="col-note">{{ cdoc.description }}</div>{% endif %}
         {% set cconsts = col_constants.get(tname, {}).get(col) %}
         {% if cconsts %}
+        <div class="col-consts-title">{{ t.constants }} <span class="consts-source">{{ t.source }}: <code>{{ cdoc.constants_from }}</code></span></div>
         <table class="consts">
           {% for cv in cconsts %}
           <tr><td>{{ cv.name }}</td><td>{{ cv.value }}</td><td>{{ cv.description }}</td></tr>
@@ -160,8 +174,7 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; }
   </table>
 
   {% if table_constants.get(tname) %}
-  <h3>{{ t.constants }}</h3>
-  <div class="table-diag-list">{{ t.source }}: <code>{{ tdoc.constants_from }}</code></div>
+  <h3>{{ t.predefined }} <span class="consts-source">{{ t.source }}: <code>{{ tdoc.constants_from }}</code></span></h3>
   <table class="consts">
     <tr><th>{{ t.name }}</th><th>{{ t.value }}</th><th>{{ t.description }}</th></tr>
     {% for c in table_constants[tname] %}

@@ -5,11 +5,11 @@ diagrams: Diagrams
 tables: Tables
 diagram_not_generated: diagram not generated
 constants: Constants
+predefined: Predefined values
 source: Source
 name: Name
 value: Value
 description: Description
 field: Field
 type: Type
-references: references
 relationships: Relationships
