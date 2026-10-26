@@ -15,13 +15,14 @@ You write only the meaning: names and descriptions of columns and tables.
   clickable.
   ![diagram-orders.png](sample/img/readme.diagram.png)
 - **Table card**:
-  ![orders.png](sample/img/readme.orders.png)
+  ![](sample/img/readme.orders-cols.png)
     - name and description;
-    - **relationship diagram**: the table in the center, around it the tables that reference it and the tables it
-      references.
-    - **table fields**:
+    - table fields:
         - name and description, data type;
         - link to the table a foreign key points to.
+- **Table relationship diagram**:
+  ![](sample/img/readme.orders-er.png)
+    - the table in the center, around it the tables that reference it and the tables it references.
 - **Contents**: diagrams and all tables with short names, navigation by links.
 - **Value dictionaries** right at the table or field: code, name, explanation. Taken from commented Java constants or
   from `.tsv` files, so code and documentation do not drift apart.
