@@ -6,8 +6,9 @@ gen-html - HTML-документация по БД (db.html) из файлов d
     db-desc.yaml    описания (правит человек), накладываются на структуру;
     db-consts.yaml константы Java-классов из constants_from (генерирует import-consts), если они используются.
 
-constants_from - Java-класс (FQN) или файл .tsv (путь от корня проекта): строки файла без заголовка,
-колонки - значение, название, пояснение.
+constants_from - Java-класс (FQN) или файл .tsv (путь от корня проекта): первая строка - заголовки колонок,
+колонки ищутся по ним (код / code, значение / text / name, пояснение / description; порядок любой, лишние -
+пропускаются); без известных заголовков - первые три колонки: значение, название, пояснение.
 
 Перед генерацией проверяется, что в db-desc.yaml нет лишнего: таблиц и колонок, которых нет в структуре,
 неизвестных ключей, таблиц диаграмм не из структуры. Есть лишнее - HTML не генерируется, код выхода 1. С --strict то же для неописанных таблиц и колонок.
@@ -49,7 +50,9 @@ PLANTUML_JAR = SCRIPT_DIR / "lib" / "plantuml.jar"
 
 # Ключи, которые может содержать db-desc.yaml; всё остальное - опечатка или устаревшее
 DOC_KEYS = {"title", "subtitle", "diagrams", "tables"}
-DIAGRAM_KEYS = {"title", "description", "tables"}
+DIAGRAM_KEYS = {"title", "description", "tables", "hide_fields", "top", "bottom"}
+# таблица в списке диаграммы - имя или {имя: {...}} с этими ключами
+DIAGRAM_TABLE_KEYS = {"hide_references"}
 TABLE_KEYS = {"title", "description", "columns", "constants_from"}
 COLUMN_KEYS = {"title", "description", "constants_from"}
 
@@ -103,13 +106,46 @@ def check_doc(schema, doc, strict=False):
             errors.append(f"  [unknown key]    {where}: {k}")
         return True
 
+    def dups(where, items):
+        seen = set()
+        for x in items:
+            if x in seen:
+                errors.append(f"  [duplicate]      {where}: {x}")
+            seen.add(x)
+
     keys("<file>", doc, DOC_KEYS)
 
     for gname, g in (doc.get("diagrams") or {}).items():
-        if keys(f"diagrams.{gname}", g, DIAGRAM_KEYS):
-            for t in g.get("tables") or []:
-                if t not in schema:
-                    errors.append(f"  [extra table]    diagrams.{gname}: {t}  (not in schema)")
+        where = f"diagrams.{gname}"
+        if not keys(where, g, DIAGRAM_KEYS):
+            continue
+        gtables = []
+        for entry in g.get("tables") or []:
+            if isinstance(entry, dict):
+                if len(entry) != 1:
+                    errors.append(f"  [bad value]      {where}: {entry}  (one table per list item expected)")
+                    continue
+                t, opts = next(iter(entry.items()))
+                if not keys(f"{where}.{t}", opts or {}, DIAGRAM_TABLE_KEYS):
+                    continue
+            else:
+                t, opts = entry, {}
+            if t not in schema:
+                errors.append(f"  [extra table]    {where}: {t}  (not in schema)")
+                continue
+            gtables.append(t)
+            dups(f"{where}.{t}.hide_references", (opts or {}).get("hide_references") or [])
+            for c in (opts or {}).get("hide_references") or []:
+                if c not in schema[t]["columns"]:
+                    errors.append(f"  [extra column]   {where}.{t}.hide_references: {c}  (not in schema)")
+        dups(f"{where}.tables", gtables)
+        for key in ("hide_fields", "top", "bottom"):
+            dups(f"{where}.{key}", g.get(key) or [])
+            for t in g.get(key) or []:
+                if t not in gtables:
+                    errors.append(f"  [extra table]    {where}.{key}: {t}  (not in diagram tables)")
+        for t in sorted(set(g.get("top") or []) & set(g.get("bottom") or [])):
+            errors.append(f"  [bad value]      {where}: {t}  (both in top and bottom)")
 
     undocumented = 0
     tables_doc = doc.get("tables") or {}
@@ -145,7 +181,16 @@ def check_doc(schema, doc, strict=False):
 
 
 def normalize_doc(doc):
-    """Колонку можно описать строкой вместо {description: ...}."""
+    """
+    Колонку можно описать строкой вместо {description: ...}. Таблицы диаграммы - список имён и {имя: {...}},
+    становятся словарём {имя -> {...}}: in в шаблоне работает как со списком.
+    """
+    for ginfo in (doc.get("diagrams") or {}).values():
+        tables = {}
+        for entry in ginfo.get("tables") or []:
+            tname, opts = next(iter(entry.items())) if isinstance(entry, dict) else (entry, None)
+            tables[tname] = opts or {}
+        ginfo["tables"] = tables
     for tdoc in (doc.get("tables") or {}).values():
         for cname, cdoc in list(((tdoc or {}).get("columns") or {}).items()):
             if isinstance(cdoc, str):
@@ -162,14 +207,33 @@ def is_tsv(source):
     return source.endswith(".tsv")
 
 
+# заголовки колонок .tsv (первая строка) -> поле константы
+TSV_HEADERS = {
+    "name": ("код", "code"),
+    "value": ("значение", "text", "name"),
+    "description": ("пояснение", "description"),
+}
+
+
 def load_tsv(path):
-    """Строки .tsv без заголовка: [{name, value, description}] по первым трём колонкам."""
+    """Строки .tsv без заголовка: [{name, value, description}]. Колонки ищутся по заголовкам первой строки
+    (TSV_HEADERS, порядок любой, лишние колонки - например, id - пропускаются); нет ни одного известного
+    заголовка - первые три колонки по порядку."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return []
+    header = [h.strip().lower() for h in lines[0].split("\t")]
+    index = {field: next((header.index(h) for h in names if h in header), None)
+             for field, names in TSV_HEADERS.items()}
+    if all(i is None for i in index.values()):
+        index = {"name": 0, "value": 1, "description": 2}
     rows = []
-    for line in path.read_text(encoding="utf-8").splitlines()[1:]:
+    for line in lines[1:]:
         if not line.strip():
             continue
-        cells = line.split("\t") + ["", "", ""]
-        rows.append({"name": cells[0], "value": cells[1], "description": cells[2]})
+        cells = line.split("\t")
+        rows.append({field: cells[i] if i is not None and i < len(cells) else ""
+                     for field, i in index.items()})
     return rows
 
 
@@ -330,6 +394,37 @@ def _col_title(tdoc, col):
     return _puml_text(cdoc.get("title") or cdoc.get("description"))
 
 
+# схема связей: если на центральную таблицу ссылается больше стольких таблиц, они не рисуются по одной,
+# а собираются по колонке-ссылке в общую рамку (package) - одна стрелка вместо десятков
+REFS_MAX_SINGLE = 6
+REFS_PER_LINE = 4  # таблиц в строке внутри рамки
+REFS_MAX_FRAMES_WIDE = 3  # рамок больше - таблицы в рамках идут в столбик, иначе не хватает ширины
+
+
+def _puml_refs_group(gid, col, tnames, tables_doc, focal_table, per_line):
+    """
+    Пунктирная рамка с таблицами, которые ссылаются на центральную через колонки col: внутри - таблицы, как везде
+    (имя ссылкой, под ним title), сеткой по per_line в строке; строки задают невидимые связи сверху вниз.
+    Стрелка к центральной идёт от невидимого якоря под нижним рядом - из нижнего края рамки, а не сбоку.
+    """
+    names = sorted(tnames)
+    anchor = f"{gid}_out"
+    # <<Rectangle>> - рамка без заголовка-вкладки
+    lines = [f'package " " as {gid} <<Rectangle>> #line:gray;line.dashed {{']
+    for n in names:
+        lines += [_puml_class(n, tables_doc), "}"]
+    lines.append(f'class " " as {anchor} #back:transparent;line:transparent {{')
+    lines.append("}")
+    lines.append("}")
+    for i in range(per_line, len(names)):
+        lines.append(f"{names[i - per_line]} -[hidden]-> {names[i]}")
+    # таблицы без соседа снизу - над якорем
+    for i in range(max(0, len(names) - per_line), len(names)):
+        lines.append(f"{names[i]} -[hidden]-> {anchor}")
+    lines.append(f"{anchor} --> {focal_table} : {col}")
+    return lines
+
+
 def puml_refs_diagram(focal_table, tables, all_refs, tables_doc):
     """Per-table refs diagram: focal + neighbors."""
     incoming = {}  # table -> [col]
@@ -346,15 +441,34 @@ def puml_refs_diagram(focal_table, tables, all_refs, tables_doc):
     if len(involved) == 1:
         return None  # isolated table, skip diagram
 
+    grouped = len(incoming) > REFS_MAX_SINGLE
     lines = [PUML_HEADER]
+    if grouped:
+        # плотная сетка в рамке: отступы по умолчанию рассчитаны на стрелки между таблицами
+        lines += ["skinparam nodesep 12", "skinparam ranksep 24"]
     for t in sorted(involved):
+        if grouped and t in incoming and t not in outgoing.values():
+            continue  # рисуется в рамке группы
         focal = t == focal_table
         lines.append(_puml_class(t, tables_doc, link=not focal))
         lines.append('}')
 
-    for t, cols in incoming.items():
-        for col in cols:
-            lines.append(f"{t} --> {focal_table} : {col}")
+    if grouped:
+        # колонки-ссылки -> таблицы: таблица со ссылкой через несколько колонок - в одной рамке, с их списком
+        by_cols = {}
+        for t, cols in incoming.items():
+            if t in outgoing.values():
+                for col in cols:
+                    lines.append(f"{t} --> {focal_table} : {col}")  # нарисована отдельно - связи в обе стороны
+            else:
+                by_cols.setdefault(", ".join(sorted(cols)), []).append(t)
+        per_line = 1 if len(by_cols) > REFS_MAX_FRAMES_WIDE else REFS_PER_LINE
+        for i, (cols, tnames) in enumerate(sorted(by_cols.items())):
+            lines += _puml_refs_group(f"_refs_{i}", cols, tnames, tables_doc, focal_table, per_line)
+    else:
+        for t, cols in incoming.items():
+            for col in cols:
+                lines.append(f"{t} --> {focal_table} : {col}")
 
     for col, ref in outgoing.items():
         if ref in tables:
@@ -364,40 +478,46 @@ def puml_refs_diagram(focal_table, tables, all_refs, tables_doc):
     return "\n".join(lines)
 
 
-def puml_group_diagram(group_tables, tables, all_refs, column_order, tables_doc):
-    """Multi-table diagram: show selected tables with their columns and FK arrows."""
-    group_set = set(group_tables)
+def puml_group_diagram(ginfo, tables, all_refs, column_order, tables_doc):
+    """
+    Multi-table diagram: show selected tables with their columns and FK arrows.
+    ginfo - диаграмма после normalize_doc: hide_fields диаграммы - таблицы, которые рисуются без полей,
+    hide_references таблицы - стрелки по этим её колонкам не рисуются.
+    top / bottom - подсказка раскладке: стрелки к таблицам top и от таблиц bottom рисуются вверх (-up->),
+    и Graphviz ставит такие таблицы выше связанных с ними.
+    """
+    group_tables = ginfo.get("tables") or {}
+    hide_fields = set(ginfo.get("hide_fields") or [])
+    top = set(ginfo.get("top") or [])
+    bottom = set(ginfo.get("bottom") or [])
     lines = [PUML_HEADER]
 
     for tname in group_tables:
         if tname not in tables:
             continue
         cols = tables[tname]["columns"]
-        refs = all_refs.get(tname, {})
         tdoc = tables_doc.get(tname) or {}
         lines.append(_puml_class(tname, tables_doc))
         pk = tables[tname]["pk"]
         for col in column_order.get(tname, cols.keys()):
-            if col in pk:
+            if col in pk or tname in hide_fields:
                 continue  # первичный ключ на диаграмме не показывается
             # {field}: скобки в title не превращают поле в метод (отдельный раздел класса)
             line = f"  {{field}} {col}"
             title = _col_title(tdoc, col)
             if title:
                 line += f" <color:gray>{title}</color>"
-            ref = refs.get(col)
-            if ref:
-                line += f" <size:19>→</size> [[#tbl_{ref} {ref}]]"  # стрелка - вне ссылки; крупнее, иначе прижата к низу строки
             lines.append(line)
         lines.append("}")
 
-    for tname in group_tables:
+    for tname, opts in group_tables.items():
         if tname not in tables:
             continue
         refs = all_refs.get(tname, {})
         for col, ref in refs.items():
-            if ref in group_set:
-                lines.append(f"{tname} --> {ref} : {col}")
+            if ref in group_tables and col not in (opts.get("hide_references") or []):
+                up = (ref in top and tname not in top) or (tname in bottom and ref not in bottom)
+                lines.append(f"{tname} -{'up' if up else ''}-> {ref} : {col}")
 
     lines.append("@enduml")
     return "\n".join(lines)
@@ -442,8 +562,7 @@ def generate_html(schema, all_refs, doc, consts, template_file, output_file, var
     # generate group diagrams
     group_svgs = {}
     for gname, ginfo in diagrams_doc.items():
-        gtables = ginfo.get("tables", [])
-        puml = puml_group_diagram(gtables, schema, all_refs, column_order, tables_doc)
+        puml = puml_group_diagram(ginfo, schema, all_refs, column_order, tables_doc)
         if puml:
             svg = run_plantuml(puml)
             if svg:
