@@ -1,4 +1,6 @@
-# doc-db
+# The doc-db tool
+
+[Утилита doc-db (readme.ru)](readme.ru.md).
 
 Database documentation in one command: a self-contained HTML file you can open, send or publish on a website.
 
