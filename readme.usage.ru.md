@@ -21,7 +21,7 @@
 Ваш проект подключает утилиту своим скриптом, например:
 
 ```bash
-TOOL="${DOC_DB:-/home/user/projects/doc-db}"
+TOOL="${DOC_DB:-$ROOT/../doc-db}"
 cd "$ROOT"
 "$TOOL/import-struct" --liquibase app-database/src/main/resources/db/changelog/db.changelog-master.xml -o doc/db/db-struct.yaml
 "$TOOL/gen-html" -o _out/doc/db-doc.html
@@ -103,7 +103,9 @@ diagrams:
   group_name:
     title: "Название диаграммы"
     description: "Пояснение"
-    tables: [ Table1, Table2 ]
+    tables: [ Table1, Table2: { hide_references: [ column3 ] } ]  # стрелки по column3 у Table2 не рисуются
+    hide_fields: [ Table1 ]  # таблицы диаграммы без полей - только заголовок
+    top: [ Table1 ]          # подсказка раскладке: выше связанных таблиц (bottom - ниже)
 tables:
   TableName:
     title: "Краткое название"
@@ -121,9 +123,10 @@ tables:
       other_column: "Краткая запись: строка вместо description"
 ```
 
-`constants_from` - Java-класс (FQN) или файл `.tsv` (путь от корня проекта). Из `.tsv` берутся строки без
-заголовка, первые три колонки - значение, название, пояснение; `import-consts` такие файлы пропускает, `gen-html` читает
-их сам.
+`constants_from` - Java-класс (FQN) или файл `.tsv` (путь от корня проекта). Первая строка `.tsv` -
+заголовки колонок; колонки ищутся по ним: `код` / `code`, `значение` / `text` / `name`, `пояснение` / `description`, в
+любом порядке, лишние (например, `id`) пропускаются. Нет ни одного известного заголовка - берутся первые три колонки:
+значение, название, пояснение. `import-consts` такие файлы пропускает, `gen-html` читает их сам.
 
 Порядок колонок в HTML - первичный ключ, затем как перечислены в `db-desc.yaml`, остальные - ссылки (FK) по алфавиту, затем
 прочие по алфавиту.
@@ -132,9 +135,10 @@ tables:
 
 `gen-html` до генерации проверяет, что в `db-desc.yaml` нет лишнего:
 
-- **[extra table]** - таблицы нет в структуре (удалена или опечатка), в том числе в списке диаграммы;
-- **[extra column]** - колонки нет в структуре;
+- **[extra table]** - таблицы нет в структуре (удалена или опечатка), в том числе в списке диаграммы; таблицы из `hide_fields`, `top`, `bottom` нет в списке диаграммы;
+- **[extra column]** - колонки нет в структуре (в том числе в `hide_references` диаграммы);
 - **[unknown key]** - ключ не из списка выше (например, `descripton`);
+- **[duplicate]** - значение повторяется в списке (`tables`, `hide_fields`, `top`, `bottom`, `hide_references` диаграммы);
 - **[no file]** - файла `.tsv` из `constants_from` нет;
 - **[no constants]** - класса из `constants_from` нет в `db-consts.yaml`: файл устарел, перезапустите `import-consts`.
 

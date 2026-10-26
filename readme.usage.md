@@ -21,7 +21,7 @@ and the `gen-html` script generates `_site/db.html` in the current directory fro
 Your project connects the tool with its own script, for example:
 
 ```bash
-TOOL="${DOC_DB:-/home/user/projects/doc-db}"
+TOOL="${DOC_DB:-$ROOT/../doc-db}"
 cd "$ROOT"
 "$TOOL/import-struct" --liquibase app-database/src/main/resources/db/changelog/db.changelog-master.xml -o doc/db/db-struct.yaml
 "$TOOL/gen-html" -o _out/doc/db-doc.html
@@ -104,7 +104,9 @@ diagrams:
   group_name:
     title: "Diagram title"
     description: "Explanation"
-    tables: [ Table1, Table2 ]
+    tables: [ Table1, Table2: { hide_references: [ column3 ] } ]  # no arrows for Table2.column3
+    hide_fields: [ Table1 ]  # diagram tables without fields - header only
+    top: [ Table1 ]          # layout hint: above the linked tables (bottom - below)
 tables:
   TableName:
     title: "Short name"
@@ -122,9 +124,10 @@ tables:
       other_column: "Short form: a string instead of description"
 ```
 
-`constants_from` - a Java class (FQN) or a `.tsv` file (path from the project root). From a `.tsv`, rows without the
-header are taken, the first three columns being value, name, explanation; `import-consts` skips such files, `gen-html`
-reads them itself.
+`constants_from` - a Java class (FQN) or a `.tsv` file (path from the project root). The first row of a `.tsv` is
+the column headers; columns are found by them: `код` / `code`, `значение` / `text` / `name`, `пояснение` / `description`,
+in any order, extra ones (e.g. `id`) are skipped. With no known header, the first three columns are taken: value, name,
+explanation. `import-consts` skips such files, `gen-html` reads them itself.
 
 Column order in the HTML - the primary key, then as listed in `db-desc.yaml`, the rest - references (FK) alphabetically, then
 the others alphabetically.
@@ -133,9 +136,10 @@ the others alphabetically.
 
 Before generating, `gen-html` checks that `db-desc.yaml` contains nothing extra:
 
-- **[extra table]** - the table is not in the structure (removed or a typo), including in a diagram's list;
-- **[extra column]** - the column is not in the structure;
+- **[extra table]** - the table is not in the structure (removed or a typo), including in a diagram's list; a `hide_fields`, `top`, `bottom` table is not in the diagram's list;
+- **[extra column]** - the column is not in the structure (including a diagram's `hide_references`);
 - **[unknown key]** - a key not from the list above (for example, `descripton`);
+- **[duplicate]** - a value is repeated in a list (a diagram's `tables`, `hide_fields`, `top`, `bottom`, `hide_references`);
 - **[no file]** - the `.tsv` file from `constants_from` does not exist;
 - **[no constants]** - the class from `constants_from` is not in `db-consts.yaml`: the file is outdated, rerun
   `import-consts`.

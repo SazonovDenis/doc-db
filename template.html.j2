@@ -69,6 +69,14 @@ table.consts { margin: 6px 0 10px; border-collapse: collapse; font-size: var(--f
 table.consts th { text-align: left; padding: 3px 8px; border: 1px solid #ddd; font-weight: normal; color: var(--c-main); }
 table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main); }
 .col-desc table.consts { margin: 2px 0 6px; line-height: 1.4; }
+/* Константы поля: свёрнуты в перечисление "(a, b, …)" после описания, по клику - таблица */
+.consts-toggle { display: none; }
+.consts-short, .consts-toggle-title { cursor: pointer; }
+.consts-short { color: var(--c-second); }
+.consts-short:hover, .consts-toggle-title:hover { color: var(--c-link); }
+.consts-full { display: none; }
+.consts-toggle:checked ~ .consts-full { display: block; }
+.consts-toggle:checked ~ * .consts-short, .consts-toggle:checked ~ .consts-short { display: none; }
 
 </style>
 {% block style %}{% endblock %}
@@ -157,16 +165,27 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
         {%- set cvalues = cinfo.get('values') %}
         {%- if cvalues %}<div class="col-values">{{ cvalues | join(', ') }}</div>{% endif %}</td>
       <td class="col-desc">
+        {%- set cconsts = col_constants.get(tname, {}).get(col) %}
+        {%- set ctoggle = 'cc_' ~ tname ~ '__' ~ col %}
+        {%- if cconsts %}
+          {%- set cshort = cconsts if cconsts | length <= 7 else cconsts[:5] %}
+          {%- set cshort_html %}<label for="{{ ctoggle }}" class="consts-short">(
+            {%- for cv in cshort %}{% if cv.value %}<span title="{{ cv.value | e }}">{{ cv.name }}</span>{% else %}{{ cv.name }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+            {%- if cshort | length < cconsts | length %}, …{% endif %})</label>{% endset %}
+        <input type="checkbox" class="consts-toggle" id="{{ ctoggle }}">
+        {%- endif %}
         {%- if cdoc.title %}<div>{{ cdoc.title }}</div>{% endif %}
-        {%- if cdoc.description %}<div class="col-note">{{ cdoc.description }}</div>{% endif %}
-        {% set cconsts = col_constants.get(tname, {}).get(col) %}
-        {% if cconsts %}
-        <div class="col-consts-title">{{ t.constants }} <span class="consts-source">{{ t.source }}: <code>{{ cdoc.constants_from }}</code></span></div>
+        {%- if cdoc.description %}<div class="col-note">{{ cdoc.description | trim }}{% if cconsts %} {{ cshort_html }}{% endif %}</div>
+        {%- elif cconsts %}<div>{{ cshort_html }}</div>{% endif %}
+        {%- if cconsts %}
+        <div class="consts-full">
+        <div class="col-consts-title"><label for="{{ ctoggle }}" class="consts-toggle-title">{{ t.constants }}</label> <span class="consts-source">{{ t.source }}: <code>{{ cdoc.constants_from }}</code></span></div>
         <table class="consts">
           {% for cv in cconsts %}
           <tr><td>{{ cv.name }}</td><td>{{ cv.value }}</td><td>{{ cv.description }}</td></tr>
           {% endfor %}
         </table>
+        </div>
         {% endif %}
       </td>
     </tr>
