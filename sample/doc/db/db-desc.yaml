@@ -1,0 +1,40 @@
+title: "Магазин"
+subtitle: "Пример doc-db: связанные таблицы, диаграммы, справочники .tsv"
+diagrams:
+  sales:
+    title: "Продажи"
+    description: "Заказ и его оплата."
+    tables: [ customers, warehouses, orders, payments ]
+tables:
+  customers:
+    title: "Покупатели"
+    columns:
+      id: "Идентификатор"
+      name: "Имя покупателя"
+      email: "Почта для уведомлений"
+  warehouses:
+    title: "Склады"
+    columns:
+      id: "Идентификатор"
+      city: "Город склада"
+  orders:
+    title: "Заказы"
+    description: |
+      Заказ покупателя. Отгружается с одного склада, оплачивается одной или несколькими оплатами.
+    columns:
+      id: "Идентификатор"
+      customer_id: "Покупатель"
+      warehouse_id: "Склад отгрузки; пусто, пока склад не выбран"
+      status:
+        title: "Статус"
+        constants_from: doc/dict/order-status.tsv
+      created_at: "Когда создан"
+  payments:
+    title: "Оплаты"
+    columns:
+      id: "Идентификатор"
+      order_id: "Оплачиваемый заказ"
+      method:
+        title: "Способ оплаты"
+        constants_from: doc/dict/payment-method.tsv
+      amount: "Сумма, руб."
