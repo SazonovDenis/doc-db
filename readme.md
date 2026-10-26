@@ -11,18 +11,18 @@ You write only the meaning: names and descriptions of columns and tables.
 
 ## What the HTML shows
 
-- **Contents**: diagrams and all tables with short names, navigation by links.
 - **ER diagrams by topic**: with fields and relationship arrows. You define the table groups. Tables on a diagram are
   clickable.
+  ![diagram-orders.png](sample/img/readme.diagram.png)
 - **Table card**:
+  ![orders.png](sample/img/readme.orders.png)
     - name and description;
-    - which diagrams the table appears on;
     - **relationship diagram**: the table in the center, around it the tables that reference it and the tables it
       references.
-- **Table fields**:
-    - data type, `PK`, `not null`;
-    - **link** to the table a foreign key points to;
-    - name and description.
+    - **table fields**:
+        - name and description, data type;
+        - link to the table a foreign key points to.
+- **Contents**: diagrams and all tables with short names, navigation by links.
 - **Value dictionaries** right at the table or field: code, name, explanation. Taken from commented Java constants or
   from `.tsv` files, so code and documentation do not drift apart.
 
