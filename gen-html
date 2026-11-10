@@ -6,9 +6,9 @@ gen-html - HTML-документация по БД (db.html) из файлов d
     db-desc.yaml    описания (правит человек), накладываются на структуру;
     db-consts.yaml константы Java-классов из constants_from (генерирует import-consts), если они используются.
 
-constants_from - Java-класс (FQN) или файл .tsv (путь от корня проекта): первая строка - заголовки колонок,
-колонки ищутся по ним (код / code, значение / text / name, пояснение / description; порядок любой, лишние -
-пропускаются); без известных заголовков - первые три колонки: значение, название, пояснение.
+constants_from - Java-класс (FQN) или файл .tsv (путь от корня проекта): первая строка - заголовки колонок
+id (значение), text (наименование), code (код), description (примечание); показываются те, что есть в файле, порядок
+в файле любой, лишние колонки пропускаются; нет ни одной - ошибка.
 
 Перед генерацией проверяется, что в db-desc.yaml нет лишнего: таблиц и колонок, которых нет в структуре,
 неизвестных ключей, таблиц диаграмм не из структуры. Есть лишнее - HTML не генерируется, код выхода 1. С --strict то же для неописанных таблиц и колонок.
@@ -207,33 +207,29 @@ def is_tsv(source):
     return source.endswith(".tsv")
 
 
-# заголовки колонок .tsv (первая строка) -> поле константы
-TSV_HEADERS = {
-    "name": ("код", "code"),
-    "value": ("значение", "text", "name"),
-    "description": ("пояснение", "description"),
-}
+# колонки .tsv по заголовкам первой строки, в порядке показа: id - значение, text - наименование, code - код,
+# description - примечание; обязательна хотя бы одна, порядок в файле любой, лишние колонки пропускаются
+TSV_COLUMNS = ("id", "text", "code", "description")
+
+# путь к .tsv из constants_from -> колонки из TSV_COLUMNS, которые есть в файле: только они показываются
+TSV_PRESENT = {}
 
 
-def load_tsv(path):
-    """Строки .tsv без заголовка: [{name, value, description}]. Колонки ищутся по заголовкам первой строки
-    (TSV_HEADERS, порядок любой, лишние колонки - например, id - пропускаются); нет ни одного известного
-    заголовка - первые три колонки по порядку."""
+def load_tsv(path, source):
+    """Строки .tsv без заголовка: [{id, text, code, description}] - только колонки, которые есть в файле
+    (TSV_PRESENT[source]). Нет ни одной колонки из TSV_COLUMNS - None."""
     lines = path.read_text(encoding="utf-8").splitlines()
-    if not lines:
-        return []
-    header = [h.strip().lower() for h in lines[0].split("\t")]
-    index = {field: next((header.index(h) for h in names if h in header), None)
-             for field, names in TSV_HEADERS.items()}
-    if all(i is None for i in index.values()):
-        index = {"name": 0, "value": 1, "description": 2}
+    header = [h.strip().lower() for h in lines[0].split("\t")] if lines else []
+    index = {field: header.index(field) for field in TSV_COLUMNS if field in header}
+    if not index:
+        return None
+    TSV_PRESENT[source] = list(index)
     rows = []
     for line in lines[1:]:
         if not line.strip():
             continue
         cells = line.split("\t")
-        rows.append({field: cells[i] if i is not None and i < len(cells) else ""
-                     for field, i in index.items()})
+        rows.append({field: cells[i] if i < len(cells) else "" for field, i in index.items()})
     return rows
 
 
@@ -243,7 +239,7 @@ CONST_FILES = {}
 
 def load_consts(doc):
     """
-    {source -> [{name, value, description}]}: source - FQN или путь к .tsv из constants_from.
+    {source -> [строка]}: source - FQN или путь к .tsv из constants_from; строка - как в resolve_constants.
     Классы - из db-consts.yaml, он нужен, только если в constants_from есть классы; класса нет в файле -
     ошибка: db-consts.yaml устарел. Файла .tsv нет - ошибка.
     """
@@ -257,13 +253,22 @@ def load_consts(doc):
                 used.append((f"{tname}.{cname}", cdoc["constants_from"]))
     consts = {}
     missing_tsv = []
+    bad_tsv = []
     for where, source in used:
         if is_tsv(source) and source not in consts:
             path = PROJECT_ROOT / source
             if path.exists():
-                consts[source] = load_tsv(path)
+                rows = load_tsv(path, source)
+                if rows is None:
+                    bad_tsv.append(f"  [bad tsv]        {where}: {source} - no header {', '.join(TSV_COLUMNS)}")
+                else:
+                    consts[source] = rows
             else:
                 missing_tsv.append(f"  [no file]        {where}: {source}")
+    if bad_tsv:
+        print("ERRORS: .tsv files from constants_from without known column headers:")
+        print("\n".join(bad_tsv))
+        sys.exit(1)
     if missing_tsv:
         print("ERRORS: .tsv files from constants_from not found (paths are relative to the project root):")
         print("\n".join(missing_tsv))
@@ -289,8 +294,9 @@ def load_consts(doc):
 def resolve_constants(doc, consts):
     """
     Returns (table_constants, col_constants).
-    table_constants: {tname -> [{name, value, description}]}
-    col_constants:   {tname -> {colname -> [{name, value, description}]}}
+    table_constants: {tname -> [строка]}
+    col_constants:   {tname -> {colname -> [строка]}}
+    строка: Java-класс - {name, value, description}; .tsv - {id, text, code, description} (колонки файла)
     """
     table_constants = {}
     col_constants = {}
@@ -599,6 +605,7 @@ def generate_html(schema, all_refs, doc, consts, template_file, output_file, var
         table_constants=table_constants,
         col_constants=col_constants,
         const_files=CONST_FILES,
+        tsv_present=TSV_PRESENT,
         column_order=column_order,
         **variables,
     )

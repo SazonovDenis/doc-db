@@ -7,9 +7,11 @@ diagram_not_generated: диаграмма не сгенерирована
 constants: Значения
 predefined: Предустановленные значения
 source: Источник
-name: Имя
 value: Значение
 in_code: В коде
+text_name: Наименование
+code: Код
+note: Примечание
 description: Описание
 field: Поле
 type: Тип

@@ -7,9 +7,11 @@ diagram_not_generated: diagram not generated
 constants: Values
 predefined: Predefined values
 source: Source
-name: Name
 value: Value
 in_code: In code
+text_name: Name
+code: Code
+note: Note
 description: Description
 field: Field
 type: Type

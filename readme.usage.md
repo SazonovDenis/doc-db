@@ -176,23 +176,35 @@ tables:
       other_column: "Short form: a string instead of description"
 ```
 
-`constants_from` - a Java class (FQN) or a `.tsv` file (path from the project root). The first row of a `.tsv` is
-the column headers; columns are found by them: `код` / `code`, `значение` / `text` / `name`, `пояснение` / `description`,
-in any order, extra ones (e.g. `id`) are skipped. With no known header, the first three columns are taken: value, name,
-explanation. `import-consts` skips such files, `gen-html` reads them itself.
+`constants_from` - a Java class (FQN) or a `.tsv` file (path from the project root). The first row of a `.tsv` is the
+column headers:
 
-Column order in the HTML - the primary key, then as listed in `db-desc.yaml`, the rest - references (FK) alphabetically, then
-the others alphabetically.
+| Column        | In the documentation | Meaning                       |
+|---------------|----------------------|-------------------------------|
+| `id`          | Value                | the value for the table field |
+| `text`        | Name                 | the value's name              |
+| `code`        | Code                 | the value's code (if any)     |
+| `description` | Note                 | notes                         |
+
+Only the columns present in the file are shown, in the table's order; the order in the file does not matter, extra
+columns are skipped. None of the four - error. `import-consts` skips such files, `gen-html` reads them itself.
+A Java class has other columns: the constant's value, its name in code, the comment.
+
+Column order in the HTML - the primary key, then as listed in `db-desc.yaml`, the rest - references (FK)
+alphabetically, then the others alphabetically.
 
 ### Checks during generation
 
 Before generating, `gen-html` checks that `db-desc.yaml` contains nothing extra:
 
-- **[extra table]** - the table is not in the structure (removed or a typo), including in a diagram's list; a `hide_fields`, `top`, `bottom` table is not in the diagram's list;
+- **[extra table]** - the table is not in the structure (removed or a typo), including in a diagram's list; a
+  `hide_fields`, `top`, `bottom` table is not in the diagram's list;
 - **[extra column]** - the column is not in the structure (including a diagram's `hide_references`);
 - **[unknown key]** - a key not from the list above (for example, `descripton`);
-- **[duplicate]** - a value is repeated in a list (a diagram's `tables`, `hide_fields`, `top`, `bottom`, `hide_references`);
+- **[duplicate]** - a value is repeated in a list (a diagram's `tables`, `hide_fields`, `top`, `bottom`,
+  `hide_references`);
 - **[no file]** - the `.tsv` file from `constants_from` does not exist;
+- **[bad tsv]** - the first row of the `.tsv` has none of the headers `id`, `text`, `code`, `description`;
 - **[no constants]** - the class from `constants_from` is not in `db-consts.yaml`: the file is outdated, rerun
   `import-consts`.
 
@@ -217,11 +229,11 @@ from `lang/XX.yaml` into the `t` variable (`{{ t.tables }}`); keys missing in a 
 A new language is one more `lang/XX.yaml` file. `--labels FILE` - the project's own labels over the language ones.
 Your own template gets `t` too.
 
-The diagram cache is `.plantuml-cache` in the project root (add it to `.gitignore`). For each diagram `gen-html` first builds its
-PlantUML text (tables, fields, relationships); the SVG name in the cache is the sha1 of that text. If the structure or
-descriptions that went into a diagram change, the text changes and so does the name: there is no such SVG, PlantUML
-runs. The other diagrams come from the cache: a rebuild takes seconds instead of ~40 s. SVGs the build did not need
-are deleted. After a PlantUML upgrade the cache can be deleted entirely.
+The diagram cache is `.plantuml-cache` in the project root (add it to `.gitignore`). For each diagram `gen-html` first
+builds its PlantUML text (tables, fields, relationships); the SVG name in the cache is the sha1 of that text. If the
+structure or descriptions that went into a diagram change, the text changes and so does the name: there is no such SVG,
+PlantUML runs. The other diagrams come from the cache: a rebuild takes seconds instead of ~40 s. SVGs the build did not
+need are deleted. After a PlantUML upgrade the cache can be deleted entirely.
 
 `import-struct -o FILE` - write to another file; `--schema` - schema for `--db` (default `public`).
 `import-consts --src DIR ...` - Java source directories (default `*/src/main/java` of the project modules); `-o FILE`.

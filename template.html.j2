@@ -86,6 +86,37 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
 {% block style %}{% endblock %}
 </head>
 <body>
+{#- Таблица значений из constants_from. Java-класс: значение, имя в коде, комментарий. .tsv: колонки id (значение),
+    text (наименование), code (код), description (примечание) - только те, что есть в файле. #}
+{%- macro consts_table(rows, source) %}
+  <table class="consts">
+    {%- if source.endswith('.tsv') %}
+    {%- set labels = {'id': t.value, 'text': t.text_name, 'code': t.code, 'description': t.note} %}
+    {%- set cols = tsv_present.get(source, []) %}
+    <tr>{% for c in cols %}<th>{{ labels[c] }}</th>{% endfor %}</tr>
+    {%- for r in rows %}
+    <tr>{% for c in cols %}<td>{{ r[c] }}</td>{% endfor %}</tr>
+    {%- endfor %}
+    {%- else %}
+    <tr><th>{{ t.value }}</th><th>{{ t.in_code }}</th><th>{{ t.description }}</th></tr>
+    {%- for r in rows %}
+    <tr><td>{{ r.value }}</td><td>{{ r.name }}</td><td>{{ r.description }}</td></tr>
+    {%- endfor %}
+    {%- endif %}
+  </table>
+{%- endmacro %}
+
+{%- macro const_short(r, source) -%}
+  {#- кратко в описании колонки: Java - имя константы, .tsv - наименование (или код, значение); значение - в подсказке #}
+  {%- if source.endswith('.tsv') -%}
+    {%- set label = r.text or r.code or r.id -%}
+    {%- set hint = r.id if label != r.id else '' -%}
+  {%- else -%}
+    {%- set label = r.name -%}{%- set hint = r.value -%}
+  {%- endif -%}
+  {%- if hint %}<span title="{{ hint | e }}">{{ label }}</span>{% else %}{{ label }}{% endif -%}
+{%- endmacro %}
+
 {% block page %}
 <h1><a id="_top"></a>{{ doc.title | default(t.default_title) }}</h1>
 {% if doc.subtitle %}<div class="subtitle">{{ doc.subtitle }}</div>{% endif %}
@@ -174,7 +205,7 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
         {%- if cconsts %}
           {%- set cshort = cconsts if cconsts | length <= 7 else cconsts[:5] %}
           {%- set cshort_html %}<label for="{{ ctoggle }}" class="consts-short">(
-            {%- for cv in cshort %}{% if cv.value %}<span title="{{ cv.value | e }}">{{ cv.name }}</span>{% else %}{{ cv.name }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+            {%- for cv in cshort %}{{ const_short(cv, cdoc.constants_from) }}{% if not loop.last %}, {% endif %}{% endfor %}
             {%- if cshort | length < cconsts | length %}, …{% endif %})</label>{% endset %}
         <input type="checkbox" class="consts-toggle" id="{{ ctoggle }}">
         {%- endif %}
@@ -184,19 +215,7 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
         {%- if cconsts %}
         <div class="consts-full">
         <div class="col-consts-title"><label for="{{ ctoggle }}" class="consts-toggle-title">{{ t.constants }}</label> <span class="consts-source">{{ t.source }}: <code>{{ const_files.get(cdoc.constants_from, cdoc.constants_from) }}</code></span></div>
-        <table class="consts">
-          {%- if cdoc.constants_from.endswith('.tsv') %}
-          {% for cv in cconsts %}
-          <tr><td>{{ cv.name }}</td><td>{{ cv.value }}</td><td>{{ cv.description }}</td></tr>
-          {% endfor %}
-          {%- else %}
-          {#- Java-класс: значение константы, имя в коде, комментарий #}
-          <tr><th>{{ t.value }}</th><th>{{ t.in_code }}</th><th>{{ t.description }}</th></tr>
-          {% for cv in cconsts %}
-          <tr><td>{{ cv.value }}</td><td>{{ cv.name }}</td><td>{{ cv.description }}</td></tr>
-          {% endfor %}
-          {%- endif %}
-        </table>
+        {{ consts_table(cconsts, cdoc.constants_from) }}
         </div>
         {% endif %}
       </td>
@@ -206,20 +225,7 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
 
   {% if table_constants.get(tname) %}
   <h3>{{ t.predefined }} <span class="consts-source">{{ t.source }}: <code>{{ const_files.get(tdoc.constants_from, tdoc.constants_from) }}</code></span></h3>
-  <table class="consts">
-    {%- if tdoc.constants_from.endswith('.tsv') %}
-    <tr><th>{{ t.name }}</th><th>{{ t.value }}</th><th>{{ t.description }}</th></tr>
-    {% for c in table_constants[tname] %}
-    <tr><td>{{ c.name }}</td><td>{{ c.value }}</td><td>{{ c.description }}</td></tr>
-    {% endfor %}
-    {%- else %}
-    {#- Java-класс: значение константы, имя в коде, комментарий #}
-    <tr><th>{{ t.value }}</th><th>{{ t.in_code }}</th><th>{{ t.description }}</th></tr>
-    {% for c in table_constants[tname] %}
-    <tr><td>{{ c.value }}</td><td>{{ c.name }}</td><td>{{ c.description }}</td></tr>
-    {% endfor %}
-    {%- endif %}
-  </table>
+  {{ consts_table(table_constants[tname], tdoc.constants_from) }}
   {% endif %}
 
   {% if table_svgs.get(tname) %}
