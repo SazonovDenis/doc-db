@@ -9,6 +9,7 @@ predefined: Predefined values
 source: Source
 name: Name
 value: Value
+in_code: In code
 description: Description
 field: Field
 type: Type

@@ -11,9 +11,10 @@
 :root {
   --fs-1: 22px; --fs-2: 17px; --fs-3: 15px; --fs-4: 14px; --fs-5: 12px;
   --c-main: #222; --c-second: #777; --c-link: #2688d4; --c-head: #1a5fa0;
+  --pad-x: 32px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: Arial, sans-serif; font-size: var(--fs-4); color: var(--c-main); background: #fff; padding: 24px 32px; }
+body { font-family: Arial, sans-serif; font-size: var(--fs-4); color: var(--c-main); background: #fff; padding: 24px var(--pad-x); }
 /* имена файлов и классов - той же гарнитурой, что и текст */
 code { font-family: inherit; font-size: 1em; }
 a { color: var(--c-link); text-decoration: none; }
@@ -34,8 +35,10 @@ ul.toc li a { color: var(--c-head); }
 
 /* Diagrams */
 .diagram-group { margin-bottom: 28px; }
-.diagram-wrapper { overflow-x: auto; margin: 4px 0 12px; }
-.diagram-wrapper svg { max-width: 100%; height: auto; }
+/* область диаграммы - до правого края окна, а не до поля страницы: сжимается только когда не влезает в окно */
+.diagram-wrapper { overflow-x: auto; margin: 4px calc(-1 * var(--pad-x)) 12px 0; }
+/* !important - PlantUML пишет высоту в style самого svg, и без него сжималась только ширина: диаграмма искажалась */
+.diagram-wrapper svg { max-width: 100%; height: auto !important; }
 .diagram-missing { color: var(--c-second); }
 
 /* Table section */
@@ -43,7 +46,8 @@ ul.toc li a { color: var(--c-head); }
 .table-header { display: flex; align-items: baseline; gap: 12px; margin: 24px 0 4px; }
 .table-header h2 { margin: 0; border: none; }
 .table-title { color: var(--c-main); }
-.table-desc { color: var(--c-main); font-style: italic; margin-bottom: 6px; line-height: 1.5; white-space: pre-wrap; }
+/* ширина - как у таблицы полей: длинные строки описания читать тяжело */
+.table-desc { color: var(--c-main); font-style: italic; margin-bottom: 6px; line-height: 1.5; white-space: pre-wrap; max-width: 50rem; }
 .table-diag-list { color: var(--c-main); margin-bottom: 8px; }
 .consts-source { font-weight: normal; color: var(--c-second); margin-left: 8px; }
 .col-consts-title { margin-top: 4px; color: var(--c-main); }
@@ -179,11 +183,19 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
         {%- elif cconsts %}<div>{{ cshort_html }}</div>{% endif %}
         {%- if cconsts %}
         <div class="consts-full">
-        <div class="col-consts-title"><label for="{{ ctoggle }}" class="consts-toggle-title">{{ t.constants }}</label> <span class="consts-source">{{ t.source }}: <code>{{ cdoc.constants_from }}</code></span></div>
+        <div class="col-consts-title"><label for="{{ ctoggle }}" class="consts-toggle-title">{{ t.constants }}</label> <span class="consts-source">{{ t.source }}: <code>{{ const_files.get(cdoc.constants_from, cdoc.constants_from) }}</code></span></div>
         <table class="consts">
+          {%- if cdoc.constants_from.endswith('.tsv') %}
           {% for cv in cconsts %}
           <tr><td>{{ cv.name }}</td><td>{{ cv.value }}</td><td>{{ cv.description }}</td></tr>
           {% endfor %}
+          {%- else %}
+          {#- Java-класс: значение константы, имя в коде, комментарий #}
+          <tr><th>{{ t.value }}</th><th>{{ t.in_code }}</th><th>{{ t.description }}</th></tr>
+          {% for cv in cconsts %}
+          <tr><td>{{ cv.value }}</td><td>{{ cv.name }}</td><td>{{ cv.description }}</td></tr>
+          {% endfor %}
+          {%- endif %}
         </table>
         </div>
         {% endif %}
@@ -193,12 +205,20 @@ table.consts td { padding: 2px 8px; border: 1px solid #ddd; color: var(--c-main)
   </table>
 
   {% if table_constants.get(tname) %}
-  <h3>{{ t.predefined }} <span class="consts-source">{{ t.source }}: <code>{{ tdoc.constants_from }}</code></span></h3>
+  <h3>{{ t.predefined }} <span class="consts-source">{{ t.source }}: <code>{{ const_files.get(tdoc.constants_from, tdoc.constants_from) }}</code></span></h3>
   <table class="consts">
+    {%- if tdoc.constants_from.endswith('.tsv') %}
     <tr><th>{{ t.name }}</th><th>{{ t.value }}</th><th>{{ t.description }}</th></tr>
     {% for c in table_constants[tname] %}
     <tr><td>{{ c.name }}</td><td>{{ c.value }}</td><td>{{ c.description }}</td></tr>
     {% endfor %}
+    {%- else %}
+    {#- Java-класс: значение константы, имя в коде, комментарий #}
+    <tr><th>{{ t.value }}</th><th>{{ t.in_code }}</th><th>{{ t.description }}</th></tr>
+    {% for c in table_constants[tname] %}
+    <tr><td>{{ c.value }}</td><td>{{ c.name }}</td><td>{{ c.description }}</td></tr>
+    {% endfor %}
+    {%- endif %}
   </table>
   {% endif %}
 

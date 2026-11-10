@@ -80,9 +80,14 @@ def parse_java_constants(path):
 
         m = re.match(r"public\s+static\s+final\s+\w+\s+(\w+)\s*=\s*(.+?)\s*;", s)
         if m:
+            value = m.group(2).strip()
+            # строковая константа: в БД хранится значение без кавычек литерала Java
+            literal = re.fullmatch(r'"(.*)"', value)
+            if literal:
+                value = literal.group(1)
             constants.append({
                 "name": m.group(1),
-                "value": m.group(2).strip(),
+                "value": value,
                 "description": " ".join(current_comment),
             })
             current_comment = []

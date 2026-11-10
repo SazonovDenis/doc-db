@@ -237,6 +237,10 @@ def load_tsv(path):
     return rows
 
 
+# Java-класс из constants_from -> файл класса из db-consts.yaml: он показывается как источник констант
+CONST_FILES = {}
+
+
 def load_consts(doc):
     """
     {source -> [{name, value, description}]}: source - FQN или путь к .tsv из constants_from.
@@ -277,6 +281,8 @@ def load_consts(doc):
         print("\n".join(missing))
         sys.exit(1)
     consts.update(java)
+    CONST_FILES.update({fqn: (info or {}).get("file") for fqn, info in (raw.get("classes") or {}).items()
+                        if (info or {}).get("file")})
     return consts
 
 
@@ -592,6 +598,7 @@ def generate_html(schema, all_refs, doc, consts, template_file, output_file, var
         group_svgs=group_svgs,
         table_constants=table_constants,
         col_constants=col_constants,
+        const_files=CONST_FILES,
         column_order=column_order,
         **variables,
     )

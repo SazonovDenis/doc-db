@@ -67,8 +67,9 @@ gen-html
 пропускается молча.
 
 Служебные таблицы `flyway_schema_history`, `databasechangelog`, `databasechangeloglock` в структуру не попадают.
-Типы приводятся к одному написанию: `varchar(50)`, `integer`, `bigint`, `numeric(6,2)`, `timestamptz`, `text[]`.
-`values` - допустимые значения из `CHECK (col IN (...))`. Составные FK не показываются.
+Типы колонок приводятся к одному короткому каноническому написанию, например `character varying(50)`, `VARCHAR(50)`,
+`nvarchar(50)`, `varchar2(50)` - приводятся к `varchar(50)`; `int8`, `bigserial` - приводятся к `bigint` и т.д.
+В `values` попадают допустимые значения из `CHECK (col IN (...))`. Составные FK не показываются.
 
 ```yaml
 tables:
@@ -86,13 +87,64 @@ tables:
 FQN в каталогах исходников; из него берутся `public static final` константы с комментарием перед ними
 (`/** ... */` или `//`). Класс не найден - ошибка, код выхода 1.
 
+**Пример** - из каталога [sample](sample) (`sample/build-sample.sh` запускает `import-consts --src src`: исходники
+примера лежат в `src`, а не в `*/src/main/java`).
+
+Ссылка на класс в `sample/doc/db/db-desc.yaml`:
+
+```yaml
+tables:
+  orders:
+    columns:
+      status:
+        title: "Статус"
+        constants_from: example.OrderStatus
+```
+
+Класс `sample/src/example/OrderStatus.java`:
+
+```java
+package example;
+
+/**
+ * Статус заказа: значения orders.status.
+ */
+public final class OrderStatus {
+
+    /** Новый: создан, не оплачен */
+    public static final int NEW = 1;
+
+    /** Оплачен: оплата получена, ждёт отгрузки */
+    public static final int PAID = 2;
+
+    /** Отгружен: передан в доставку */
+    public static final int SHIPPED = 3;
+
+    // Отменён: отменён покупателем или магазином
+    public static final int CANCELLED = 4;
+
+    private OrderStatus() {
+    }
+
+}
+```
+
+Что получается в `sample/doc/db/db-consts.yaml`:
+
 ```yaml
 classes:
-  kz.example.Status:
-    file: app/src/main/java/kz/example/Status.java
+  example.OrderStatus:
+    file: src/example/OrderStatus.java
     constants:
-      - { name: NEW, value: '1', description: 'Новая' }
+      - { name: NEW, value: '1', description: 'Новый: создан, не оплачен' }
+      - { name: PAID, value: '2', description: 'Оплачен: оплата получена, ждёт отгрузки' }
+      - { name: SHIPPED, value: '3', description: 'Отгружен: передан в доставку' }
+      - { name: CANCELLED, value: '4', description: 'Отменён: отменён покупателем или магазином' }
 ```
+
+Итог - в документации для поля `orders.status` показаны возможные значения:
+
+![readme.orders.status.png](sample/img/readme.orders.status.png)
 
 ### Формат описания структуры базы в db-desc.yaml
 
@@ -111,12 +163,12 @@ tables:
     title: "Краткое название"
     description: |
       Многострочное описание.
-    constants_from: kz.example.Constants   # Java-класс с константами (необязательно)
+    constants_from: example.Constants   # Java-класс с константами (необязательно)
     columns:
       column_name:
         title: "Краткое название"          # на диаграмме рядом с именем поля; нет - description
         description: "Описание поля"
-        constants_from: kz.example.Status  # необязательно
+        constants_from: example.Status  # необязательно
       status:
         title: "Статус"
         constants_from: doc/dict/statuses.tsv  # или справочник .tsv
@@ -128,17 +180,20 @@ tables:
 любом порядке, лишние (например, `id`) пропускаются. Нет ни одного известного заголовка - берутся первые три колонки:
 значение, название, пояснение. `import-consts` такие файлы пропускает, `gen-html` читает их сам.
 
-Порядок колонок в HTML - первичный ключ, затем как перечислены в `db-desc.yaml`, остальные - ссылки (FK) по алфавиту, затем
+Порядок колонок в HTML - первичный ключ, затем как перечислены в `db-desc.yaml`, остальные - ссылки (FK) по алфавиту,
+затем
 прочие по алфавиту.
 
 ### Проверка при генерации
 
 `gen-html` до генерации проверяет, что в `db-desc.yaml` нет лишнего:
 
-- **[extra table]** - таблицы нет в структуре (удалена или опечатка), в том числе в списке диаграммы; таблицы из `hide_fields`, `top`, `bottom` нет в списке диаграммы;
+- **[extra table]** - таблицы нет в структуре (удалена или опечатка), в том числе в списке диаграммы; таблицы из
+  `hide_fields`, `top`, `bottom` нет в списке диаграммы;
 - **[extra column]** - колонки нет в структуре (в том числе в `hide_references` диаграммы);
 - **[unknown key]** - ключ не из списка выше (например, `descripton`);
-- **[duplicate]** - значение повторяется в списке (`tables`, `hide_fields`, `top`, `bottom`, `hide_references` диаграммы);
+- **[duplicate]** - значение повторяется в списке (`tables`, `hide_fields`, `top`, `bottom`, `hide_references`
+  диаграммы);
 - **[no file]** - файла `.tsv` из `constants_from` нет;
 - **[no constants]** - класса из `constants_from` нет в `db-consts.yaml`: файл устарел, перезапустите `import-consts`.
 
@@ -162,10 +217,12 @@ tables:
 `lang/XX.yaml` в переменную `t` (`{{ t.tables }}`); ключи, которых нет в языке, - из `en.yaml`. Новый язык - ещё
 один файл `lang/XX.yaml`. `--labels FILE` - свои подписи проекта поверх языковых. Свой шаблон тоже получает `t`.
 
-Кэш диаграмм - `.plantuml-cache` в корне проекта (добавьте его в `.gitignore`). Для каждой диаграммы `gen-html` сначала строит её
+Кэш диаграмм - `.plantuml-cache` в корне проекта (добавьте его в `.gitignore`). Для каждой диаграммы `gen-html` сначала
+строит её
 текст PlantUML (таблицы, поля, связи); имя SVG в кэше - sha1 этого текста. Изменились структура или описания,
 попавшие в диаграмму, - меняется текст, а с ним и имя: такого SVG нет, PlantUML запускается. Остальные диаграммы
-берутся из кэша: повторная сборка - секунды вместо ~40 с. SVG, которые сборке не понадобились, удаляются. После обновления PlantUML кэш можно удалить целиком.
+берутся из кэша: повторная сборка - секунды вместо ~40 с. SVG, которые сборке не понадобились, удаляются. После
+обновления PlantUML кэш можно удалить целиком.
 
 `import-struct -o FILE` - писать в другой файл; `--schema` - схема для `--db` (по умолчанию `public`).
 `import-consts --src DIR ...` - каталоги исходников Java (по умолчанию `*/src/main/java` модулей проекта); `-o FILE`.

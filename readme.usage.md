@@ -68,8 +68,9 @@ Whatever cannot be parsed (unknown table, column, operation) is written to stder
 silently skipped.
 
 The service tables `flyway_schema_history`, `databasechangelog`, `databasechangeloglock` are not included.
-Types are normalized to one spelling: `varchar(50)`, `integer`, `bigint`, `numeric(6,2)`, `timestamptz`, `text[]`.
-`values` - allowed values from `CHECK (col IN (...))`. Composite FKs are not shown.
+Column types are normalized to one short canonical spelling, e.g. `character varying(50)`, `VARCHAR(50)`,
+`nvarchar(50)`, `varchar2(50)` become `varchar(50)`; `int8`, `bigserial` become `bigint`, etc.
+`values` gets the allowed values from `CHECK (col IN (...))`. Composite FKs are not shown.
 
 ```yaml
 tables:
@@ -87,13 +88,64 @@ Collects the constants of the classes listed in `constants_from` in `db-desc.yam
 is looked up by FQN in the source directories; `public static final` constants with a comment before them
 (`/** ... */` or `//`) are taken from it. Class not found - error, exit code 1.
 
+**Example** - from the [sample](sample) directory (`sample/build-sample.sh` runs `import-consts --src src`: the sample's
+sources are in `src`, not in `*/src/main/java`).
+
+Class reference in `sample/doc/db/db-desc.yaml`:
+
+```yaml
+tables:
+  orders:
+    columns:
+      status:
+        title: "Статус"
+        constants_from: example.OrderStatus
+```
+
+Class `sample/src/example/OrderStatus.java`:
+
+```java
+package example;
+
+/**
+ * Статус заказа: значения orders.status.
+ */
+public final class OrderStatus {
+
+    /** Новый: создан, не оплачен */
+    public static final int NEW = 1;
+
+    /** Оплачен: оплата получена, ждёт отгрузки */
+    public static final int PAID = 2;
+
+    /** Отгружен: передан в доставку */
+    public static final int SHIPPED = 3;
+
+    // Отменён: отменён покупателем или магазином
+    public static final int CANCELLED = 4;
+
+    private OrderStatus() {
+    }
+
+}
+```
+
+Resulting `sample/doc/db/db-consts.yaml`:
+
 ```yaml
 classes:
-  kz.example.Status:
-    file: app/src/main/java/kz/example/Status.java
+  example.OrderStatus:
+    file: src/example/OrderStatus.java
     constants:
-      - { name: NEW, value: '1', description: 'New' }
+      - { name: NEW, value: '1', description: 'Новый: создан, не оплачен' }
+      - { name: PAID, value: '2', description: 'Оплачен: оплата получена, ждёт отгрузки' }
+      - { name: SHIPPED, value: '3', description: 'Отгружен: передан в доставку' }
+      - { name: CANCELLED, value: '4', description: 'Отменён: отменён покупателем или магазином' }
 ```
+
+Result - the documentation shows the possible values of the `orders.status` field:
+
+![readme.orders.status.png](sample/img/readme.orders.status.png)
 
 ### Database description format in db-desc.yaml
 
@@ -112,12 +164,12 @@ tables:
     title: "Short name"
     description: |
       Multi-line description.
-    constants_from: kz.example.Constants   # Java class with constants (optional)
+    constants_from: example.Constants   # Java class with constants (optional)
     columns:
       column_name:
         title: "Short name"                # on the diagram next to the field name; if absent - description
         description: "Field description"
-        constants_from: kz.example.Status  # optional
+        constants_from: example.Status  # optional
       status:
         title: "Status"
         constants_from: doc/dict/statuses.tsv  # or a .tsv dictionary

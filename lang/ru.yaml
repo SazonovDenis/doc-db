@@ -9,6 +9,7 @@ predefined: Предустановленные значения
 source: Источник
 name: Имя
 value: Значение
+in_code: В коде
 description: Описание
 field: Поле
 type: Тип

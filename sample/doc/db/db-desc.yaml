@@ -27,7 +27,7 @@ tables:
       warehouse_id: "Склад отгрузки; пусто, пока склад не выбран"
       status:
         title: "Статус"
-        constants_from: doc/dict/order-status.tsv
+        constants_from: example.OrderStatus
       created_at: "Когда создан"
   payments:
     title: "Оплаты"

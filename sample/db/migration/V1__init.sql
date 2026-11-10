@@ -13,7 +13,7 @@ CREATE TABLE orders (
     id           bigint PRIMARY KEY,
     customer_id  bigint NOT NULL REFERENCES customers (id),
     warehouse_id bigint REFERENCES warehouses (id),
-    status       varchar(20) NOT NULL,
+    status       integer NOT NULL,
     created_at   timestamptz NOT NULL
 );
 
